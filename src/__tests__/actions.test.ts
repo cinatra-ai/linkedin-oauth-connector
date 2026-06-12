@@ -27,9 +27,6 @@ const h = vi.hoisted(() => {
     setExtensionConnectorConfig: vi.fn((_pkg: string, key: string, value: unknown) => {
       store.set(key, value);
     }),
-    redirect: vi.fn((to: string) => {
-      throw new Error(`__redirect__:${to}`);
-    }),
   };
 });
 
@@ -38,7 +35,6 @@ const {
   requireExtensionAction,
   getExtensionConnectorConfig,
   setExtensionConnectorConfig,
-  redirect,
 } = h;
 
 vi.mock("@cinatra-ai/sdk-extensions", () => ({
@@ -46,7 +42,6 @@ vi.mock("@cinatra-ai/sdk-extensions", () => ({
   getExtensionConnectorConfig: h.getExtensionConnectorConfig,
   setExtensionConnectorConfig: h.setExtensionConnectorConfig,
 }));
-vi.mock("next/navigation", () => ({ redirect: h.redirect }));
 
 import { saveLinkedInOAuthConnectionAction } from "../actions";
 
@@ -57,8 +52,9 @@ function form(entries: Record<string, string>): FormData {
 }
 
 async function run(fd: FormData) {
-  // The action ends in redirect(), which we make throw a sentinel.
-  await expect(saveLinkedInOAuthConnectionAction(fd)).rejects.toThrow(/__redirect__:/);
+  // The action returns normally (no redirect) — the client form notifies on
+  // success; a redirect() would throw NEXT_REDIRECT the form would mis-handle.
+  await expect(saveLinkedInOAuthConnectionAction(fd)).resolves.toBeUndefined();
 }
 
 beforeEach(() => {

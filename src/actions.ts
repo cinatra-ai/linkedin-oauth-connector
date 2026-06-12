@@ -17,7 +17,6 @@
 // dead key "linkedin_connection", which nobody read.
 
 import { z } from "zod";
-import { redirect } from "next/navigation";
 import {
   requireExtensionAction,
   getExtensionConnectorConfig,
@@ -27,7 +26,6 @@ import {
 const PACKAGE_NAME = "@cinatra-ai/linkedin-oauth-connector";
 // The shared connector-config key the host's `@/lib/linkedin-api` reads/writes.
 const LINKEDIN_CONFIG_KEY = "linkedin";
-const SETUP_HREF = "/connectors/cinatra-ai/linkedin-oauth-connector/setup";
 
 const linkedinOAuthSchema = z.object({
   clientId: z.string().optional(),
@@ -73,7 +71,9 @@ export async function saveLinkedInOAuthConnectionAction(formData: FormData) {
   };
 
   setExtensionConnectorConfig(PACKAGE_NAME, LINKEDIN_CONFIG_KEY, next);
-
-  const redirectTo = (formData.get("redirectTo") as string | null)?.trim() || SETUP_HREF;
-  redirect(redirectTo);
+  // No redirect: the setup page is already the current route. Returning
+  // normally lets the client form show a success notification and refresh the
+  // server component (mirrors google-oauth-connector's save action, which also
+  // does not redirect). A redirect() here would throw NEXT_REDIRECT, which the
+  // client form's try/catch would mis-handle as a save failure.
 }
