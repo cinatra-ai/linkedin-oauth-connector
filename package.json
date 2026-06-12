@@ -1,0 +1,54 @@
+{
+  "name": "@cinatra-ai/linkedin-oauth-connector",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "files": [
+    "src"
+  ],
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./setup-page": "./src/setup-page.tsx",
+    "./actions": "./src/actions.ts"
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.7.0",
+    "radix-ui": "^1.4.3",
+    "tailwind-merge": "^3.5.0",
+    "zod": "^4.3.6"
+  },
+  "peerDependencies": {
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "@cinatra-ai/sdk-extensions": "*",
+    "@cinatra-ai/sdk-ui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@cinatra-ai/sdk-extensions": {
+      "optional": true
+    },
+    "@cinatra-ai/sdk-ui": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@typescript-eslint/parser": "8.61.0",
+    "eslint": "10.4.1",
+    "typescript": "5.9.3"
+  },
+  "cinatra": {
+    "apiVersion": "cinatra.ai/v1",
+    "kind": "connector",
+    "displayName": "LinkedIn OAuth",
+    "requestedHostPorts": [],
+    "dependencies": []
+  },
+  "scripts": {
+    "test": "vitest",
+    "lint": "eslint . --no-inline-config"
+  }
+}

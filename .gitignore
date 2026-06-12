@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output (tsc outDir)
+dist/
+
+# Test coverage (vitest)
+coverage/
+
+# Env files & secrets
+.env*
+!.env.example
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Claude Code (local-only session data)
+.claude/
+.planning/
