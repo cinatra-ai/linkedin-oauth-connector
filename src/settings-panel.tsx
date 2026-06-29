@@ -7,6 +7,10 @@ import { Button } from "./components/ui/button";
 import { Card, CardContent } from "./components/ui/card";
 import { Input } from "./components/ui/input";
 import { Label } from "./components/ui/label";
+import { TextLink } from "./components/ui/text-link";
+
+// Where admins create the LinkedIn app that issues the Client ID / secret.
+const LINKEDIN_DEVELOPER_PORTAL_URL = "https://www.linkedin.com/developers/apps";
 
 type LinkedInOAuthSettingsPanelProps = {
   settings: {
@@ -64,8 +68,10 @@ export function LinkedInOAuthSettingsPanel({
             <h2 className="text-2xl font-semibold tracking-tight">LinkedIn OAuth configuration</h2>
             <p className="mt-3 max-w-[64ch] text-sm leading-[1.55] text-pretty text-muted-foreground">
               Configure the LinkedIn app the workspace uses to connect member and organization accounts.
-              Create a LinkedIn developer app, then save its Client ID and Client secret here. Once saved,
-              users can connect their LinkedIn account from the LinkedIn connector.
+              Create a{" "}
+              <TextLink href={LINKEDIN_DEVELOPER_PORTAL_URL}>LinkedIn developer app</TextLink>{" "}
+              (LinkedIn Developer Portal &rarr; Create app), then save its Client ID and Client secret here.
+              Once saved, users can connect their LinkedIn account from the LinkedIn connector.
             </p>
           </div>
           <StatusPill status={pill.pill}>{pill.label}</StatusPill>
