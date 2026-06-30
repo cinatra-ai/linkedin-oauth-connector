@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useNotify } from "@cinatra-ai/sdk-ui";
 import { saveLinkedInOAuthConnectionAction } from "./actions";
 import { LinkedInOAuthSettingsPanel } from "./settings-panel";
@@ -24,6 +25,7 @@ export function LinkedInOAuthSettingsForm({
   status,
   redirectUri,
 }: LinkedInOAuthSettingsFormProps) {
+  const router = useRouter();
   const { addNotification } = useNotify();
 
   async function handleSubmit(formData: FormData) {
@@ -34,6 +36,14 @@ export function LinkedInOAuthSettingsForm({
         body: "LinkedIn OAuth settings have been updated.",
         kind: "success",
       });
+      // Re-render the setup page's server component so it re-reads the
+      // just-saved credentials. The save action persists via the merge-preserve
+      // setExtensionConnectorConfig but cannot revalidate a path itself: this
+      // connector is mounted by the host at a dynamic dispatch route it does not
+      // know (and must not couple to). router.refresh() re-fetches the current
+      // route's RSC payload, so the panel renders the stored Client ID and the
+      // "saved" secret affordance instead of the stale, empty pre-save fields.
+      router.refresh();
     } catch {
       // In a Next.js production build, a thrown Server Action error reaches this
       // catch with its real message replaced by the framework's generic masking
