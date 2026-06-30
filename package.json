@@ -50,6 +50,7 @@
       "name": "Cinatra"
     },
     "displayName": "LinkedIn OAuth",
+    "sdkAbiRange": "^2",
     "requestedHostPorts": [],
     "dependencies": []
   },
