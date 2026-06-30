@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
-import { StatusPill, type StatusPillStatus } from "@cinatra-ai/sdk-ui";
 import { Button } from "./components/ui/button";
 import { Card, CardContent } from "./components/ui/card";
 import { Input } from "./components/ui/input";
@@ -27,17 +26,6 @@ type LinkedInOAuthSettingsPanelProps = {
   action: (formData: FormData) => void | Promise<void>;
 };
 
-// Map the connector's credential status to the canonical StatusPill vocabulary
-// (status flows through StatusPill, never a hand-rolled badge).
-const STATUS_PILL: Record<
-  LinkedInOAuthSettingsPanelProps["status"]["status"],
-  { pill: StatusPillStatus; label: string }
-> = {
-  connected: { pill: "approved", label: "Configured" },
-  incomplete: { pill: "needs-review", label: "Setup required" },
-  not_connected: { pill: "idle", label: "Not configured" },
-};
-
 export function LinkedInOAuthSettingsPanel({
   settings,
   status,
@@ -45,7 +33,6 @@ export function LinkedInOAuthSettingsPanel({
   action,
 }: LinkedInOAuthSettingsPanelProps) {
   const [copied, setCopied] = useState(false);
-  const pill = STATUS_PILL[status.status];
 
   async function handleCopyRedirectUri() {
     if (!redirectUri) {
@@ -63,18 +50,20 @@ export function LinkedInOAuthSettingsPanel({
   return (
     <Card className="border-line bg-surface backdrop-blur-none rounded-card">
       <CardContent className="p-6">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h2 className="text-2xl font-semibold tracking-tight">LinkedIn OAuth configuration</h2>
-            <p className="mt-3 max-w-[64ch] text-sm leading-[1.55] text-pretty text-muted-foreground">
-              Configure the LinkedIn app the workspace uses to connect member and organization accounts.
-              Create a{" "}
-              <TextLink href={LINKEDIN_DEVELOPER_PORTAL_URL}>LinkedIn developer app</TextLink>{" "}
-              (LinkedIn Developer Portal &rarr; Create app), then save its Client ID and Client secret here.
-              Once saved, users can connect their LinkedIn account from the LinkedIn connector.
-            </p>
-          </div>
-          <StatusPill status={pill.pill}>{pill.label}</StatusPill>
+        {/* The connection-status badge is HOST-injected on the connector
+            setup-page dispatch route — the same badge the /connectors card
+            shows — so the extension no longer renders its own status pill here
+            (it would duplicate the host badge). The title, the status detail
+            note, and the form stay extension-owned. */}
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">LinkedIn OAuth configuration</h2>
+          <p className="mt-3 max-w-[64ch] text-sm leading-[1.55] text-pretty text-muted-foreground">
+            Configure the LinkedIn app the workspace uses to connect member and organization accounts.
+            Create a{" "}
+            <TextLink href={LINKEDIN_DEVELOPER_PORTAL_URL}>LinkedIn developer app</TextLink>{" "}
+            (LinkedIn Developer Portal &rarr; Create app), then save its Client ID and Client secret here.
+            Once saved, users can connect their LinkedIn account from the LinkedIn connector.
+          </p>
         </div>
 
         {status.detail ? (
