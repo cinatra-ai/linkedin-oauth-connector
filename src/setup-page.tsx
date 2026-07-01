@@ -32,12 +32,23 @@ type LinkedInConnectorConfig = {
   redirectUri?: string;
 };
 
-export default async function LinkedInOAuthConnectorSetupPage(_props: ConnectorSetupPageProps) {
+export default async function LinkedInOAuthConnectorSetupPage({ ctx }: ConnectorSetupPageProps) {
   const settings = getExtensionConnectorConfig<LinkedInConnectorConfig>(
     PACKAGE_NAME,
     LINKEDIN_CONFIG_KEY,
     {},
   );
+
+  // Surface the EXACT redirect_uri Nango sends to LinkedIn so admins register
+  // that literal value in their LinkedIn app — otherwise they hit "The
+  // redirect_uri does not match the registered value" (cinatra#761). The OAuth
+  // flow is fully Nango-owned, so the connector never builds the URL itself; it
+  // reads the canonical value from the host via the post-2.2.0 additive OPTIONAL
+  // getter `getNangoOAuthCallbackUrl`. Read it null-safe (a host predating the
+  // getter, or without a Nango port, simply yields no echo) and fall back to any
+  // value already persisted on the connector config.
+  const redirectUri =
+    (await ctx.nango?.getNangoOAuthCallbackUrl?.()) ?? settings.redirectUri;
 
   const clientIdSet = Boolean(settings.clientId && settings.clientId.trim());
   const clientSecretSet = Boolean(settings.clientSecret && settings.clientSecret.trim());
@@ -69,7 +80,7 @@ export default async function LinkedInOAuthConnectorSetupPage(_props: ConnectorS
         <LinkedInOAuthSettingsForm
           administration={administration}
           status={status}
-          redirectUri={settings.redirectUri}
+          redirectUri={redirectUri}
         />
       </PageContent>
     </Main>
