@@ -51,7 +51,7 @@
     },
     "displayName": "LinkedIn OAuth",
     "sdkAbiRange": "^2",
-    "requestedHostPorts": [],
+    "requestedHostPorts": ["nango"],
     "dependencies": []
   },
   "scripts": {

@@ -32,7 +32,7 @@ type LinkedInConnectorConfig = {
   redirectUri?: string;
 };
 
-export default async function LinkedInOAuthConnectorSetupPage(_props: ConnectorSetupPageProps) {
+export default async function LinkedInOAuthConnectorSetupPage(props: ConnectorSetupPageProps) {
   const settings = getExtensionConnectorConfig<LinkedInConnectorConfig>(
     PACKAGE_NAME,
     LINKEDIN_CONFIG_KEY,
@@ -62,6 +62,15 @@ export default async function LinkedInOAuthConnectorSetupPage(_props: ConnectorS
           }
         : { status: "not_connected" };
 
+  // The exact OAuth redirect_uri Nango sends to LinkedIn — echo it verbatim so
+  // the admin registers registered == sent. Sourced from the canonical host
+  // helper (getNangoOAuthCallbackUrl), NOT reconstructed from Nango's frontend
+  // baseURL (that is the Connect-UI origin, not the OAuth server). Null-safe: the
+  // accessor is optional on HostNangoPort at this connector's `^2` ABI floor, so
+  // fall back to the stored value on hosts that predate it.
+  const redirectUri =
+    (await props.ctx.nango.getNangoOAuthCallbackUrl?.()) ?? settings.redirectUri;
+
   return (
     <Main className="min-h-screen">
       <PageHeader title="LinkedIn OAuth" description="API setup" className="max-w-3xl" />
@@ -69,7 +78,7 @@ export default async function LinkedInOAuthConnectorSetupPage(_props: ConnectorS
         <LinkedInOAuthSettingsForm
           administration={administration}
           status={status}
-          redirectUri={settings.redirectUri}
+          redirectUri={redirectUri}
         />
       </PageContent>
     </Main>
