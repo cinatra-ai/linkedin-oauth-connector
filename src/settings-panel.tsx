@@ -9,7 +9,9 @@ import { Label } from "./components/ui/label";
 import { TextLink } from "./components/ui/text-link";
 
 // Where admins create the LinkedIn app that issues the Client ID / secret.
-const LINKEDIN_DEVELOPER_PORTAL_URL = "https://www.linkedin.com/developers/apps";
+// Exported so the setup page's Help tab (cinatra-ai/linkedin-oauth-connector#34)
+// can reference the SAME URL without duplicating the literal.
+export const LINKEDIN_DEVELOPER_PORTAL_URL = "https://www.linkedin.com/developers/apps";
 
 type LinkedInOAuthSettingsPanelProps = {
   settings: {
