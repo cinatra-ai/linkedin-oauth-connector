@@ -12,6 +12,7 @@ const serverOnlyStub = path.join(repoRoot, "tests/__stubs__/server-only.ts");
 export default defineConfig({
   resolve: {
     alias: [
+      { find: /^@cinatra-ai\/design-primitives$/, replacement: path.join(__dirname, "src/__tests__/fixtures/design-primitives.tsx") },
       { find: "server-only", replacement: serverOnlyStub },
       // @/ → repo-root src, should tests grow imports of host lib modules.
       { find: /^@\/(.+)$/, replacement: path.join(repoRoot, "src") + "/$1" },

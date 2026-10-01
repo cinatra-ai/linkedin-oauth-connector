@@ -28,7 +28,7 @@ import type { ExtensionHostContext } from "@cinatra-ai/sdk-extensions";
 import { getExtensionConnectorConfig } from "@cinatra-ai/sdk-extensions";
 import { LinkedInOAuthSettingsForm } from "./settings-form";
 import { LINKEDIN_DEVELOPER_PORTAL_URL } from "./settings-panel";
-import { TextLink } from "./components/ui/text-link";
+import { TextLink } from "./ui/text-link";
 
 const PACKAGE_NAME = "@cinatra-ai/linkedin-oauth-connector";
 const LINKEDIN_CONFIG_KEY = "linkedin";

@@ -2,11 +2,11 @@
 
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
-import { Button } from "./components/ui/button";
-import { Card, CardContent } from "./components/ui/card";
-import { Input } from "./components/ui/input";
-import { Label } from "./components/ui/label";
-import { TextLink } from "./components/ui/text-link";
+import { Button } from "@cinatra-ai/design-primitives";
+import { Card, CardContent } from "@cinatra-ai/design-primitives";
+import { Input } from "@cinatra-ai/design-primitives";
+import { Label } from "@cinatra-ai/design-primitives";
+import { TextLink } from "./ui/text-link";
 
 // Where admins create the LinkedIn app that issues the Client ID / secret.
 // Exported so the setup page's Help tab (cinatra-ai/linkedin-oauth-connector#34)
