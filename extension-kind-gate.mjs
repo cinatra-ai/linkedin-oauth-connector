@@ -731,6 +731,9 @@ export function validateCommon(packageRoot) {
     }
     for (const h of scanHostInternalImports(text)) hostInternal.add(h);
     for (const imp of parseModuleImports(text)) {
+      // This exact virtual module is served by the host, not a registry package.
+      // Subpaths and dependency declarations still take the ordinary SDK gate.
+      if (imp.specifier === "@cinatra-ai/design-primitives") continue;
       const base = basePackageOf(imp.specifier);
       if (base && base !== selfName && isSdkOnlyViolation(base)) sdkOnly.add(base);
     }
