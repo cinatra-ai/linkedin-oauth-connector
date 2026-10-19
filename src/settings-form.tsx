@@ -12,6 +12,7 @@ type LinkedInOAuthSettingsFormProps = {
     // host only tells the form whether a secret is already stored, so it can
     // show a "saved" affordance. Submitting a blank secret keeps the stored value.
     clientSecretSet?: boolean;
+    organizationPosting?: boolean;
   };
   status: {
     status: "connected" | "incomplete" | "not_connected";

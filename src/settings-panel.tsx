@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { Button } from "@cinatra-ai/design-primitives";
-import { Card, CardContent } from "@cinatra-ai/design-primitives";
+import { Card, CardContent, Checkbox } from "@cinatra-ai/design-primitives";
 import { Input } from "@cinatra-ai/design-primitives";
 import { Label } from "@cinatra-ai/design-primitives";
 import { TextLink } from "./ui/text-link";
@@ -19,6 +19,8 @@ type LinkedInOAuthSettingsPanelProps = {
     // Write-only: the secret value never reaches the client; we only know
     // whether one is already stored (to render a "saved" affordance).
     clientSecretSet?: boolean;
+    // True when the saved app is a Community Management API app.
+    organizationPosting?: boolean;
   };
   status: {
     status: "connected" | "incomplete" | "not_connected";
@@ -93,6 +95,26 @@ export function LinkedInOAuthSettingsPanel({
               autoComplete="off"
             />
           </Label>
+          <div className="flex items-start gap-3 sm:col-span-2">
+            <Checkbox
+              id="linkedin-organization-posting"
+              name="organizationPosting"
+              value="true"
+              defaultChecked={settings.organizationPosting === true}
+              aria-describedby="linkedin-organization-posting-help"
+              className="mt-0.5"
+            />
+            <div className="grid gap-1">
+              <Label htmlFor="linkedin-organization-posting">
+                This app has the Community Management API (post to company pages)
+              </Label>
+              <span id="linkedin-organization-posting-help" className="text-xs font-normal text-muted-foreground">
+                Tick this only for an app whose one product is the Community Management API. Connecting then asks
+                LinkedIn for company page permissions instead of sign-in permissions. After changing it, reconnect
+                each LinkedIn account.
+              </span>
+            </div>
+          </div>
           {redirectUri ? (
             <div className="grid gap-3 text-sm font-medium sm:col-span-2">
               <div>Authorized redirect URI</div>

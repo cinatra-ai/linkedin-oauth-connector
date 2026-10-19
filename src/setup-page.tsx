@@ -43,6 +43,7 @@ type ConnectorSetupPageProps = {
 type LinkedInConnectorConfig = {
   clientId?: string;
   clientSecret?: string;
+  organizationPosting?: boolean;
   redirectUri?: string;
 };
 
@@ -70,6 +71,8 @@ export default async function LinkedInOAuthConnectorSetupPage({ ctx }: Connector
   const administration = {
     clientId: settings.clientId,
     clientSecretSet,
+    // Only a stored boolean true turns organization posting on.
+    organizationPosting: settings.organizationPosting === true,
   };
 
   // Credentials are "configured" only when BOTH the client id and secret are

@@ -30,6 +30,8 @@ const LINKEDIN_CONFIG_KEY = "linkedin";
 const linkedinOAuthSchema = z.object({
   clientId: z.string().optional(),
   clientSecret: z.string().optional(),
+  // A checkbox: a ticked box submits "true", an unticked box submits nothing.
+  organizationPosting: z.string().optional(),
 });
 
 // The full shape the host's linkedin-api persists under key "linkedin". Only
@@ -39,6 +41,9 @@ const linkedinOAuthSchema = z.object({
 type LinkedInConnectorConfig = {
   clientId?: string;
   clientSecret?: string;
+  // True only for a LinkedIn app whose one product is the Community Management
+  // API: Connect then asks for company page scopes instead of sign-in scopes.
+  organizationPosting?: boolean;
   redirectUri?: string;
   loggingEnabled?: boolean;
   accounts?: unknown[];
@@ -49,6 +54,7 @@ export async function saveLinkedInOAuthConnectionAction(formData: FormData) {
   const parsed = linkedinOAuthSchema.parse({
     clientId: formData.get("clientId") ?? undefined,
     clientSecret: formData.get("clientSecret") ?? undefined,
+    organizationPosting: formData.get("organizationPosting") ?? undefined,
   });
 
   const current = getExtensionConnectorConfig<LinkedInConnectorConfig>(
@@ -68,6 +74,9 @@ export async function saveLinkedInOAuthConnectionAction(formData: FormData) {
     ...current,
     clientId: trimmedClientId || current.clientId,
     clientSecret: trimmedClientSecret || current.clientSecret,
+    // Not merge-preserved: the box is part of every submit, so an absent value
+    // means the admin left it unticked.
+    organizationPosting: parsed.organizationPosting === "true",
   };
 
   setExtensionConnectorConfig(PACKAGE_NAME, LINKEDIN_CONFIG_KEY, next);
