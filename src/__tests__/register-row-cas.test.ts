@@ -1,21 +1,34 @@
 // saveConnection and clearConnection change the shared "linkedin" row that the
 // LinkedIn connector also writes (accounts, loggingEnabled, redirectUri).
 //
-// Rule 1 (compare-and-set): a write lands only when the row read right before
+// Rule 1 (re-read compare): a write lands only when the row read right before
 // it equals the row the change was computed from. A second writer between the
 // read and the write makes the handler start again on the fresh row; after
 // three attempts it refuses with LINKEDIN_CONFIG_CONFLICT and writes nothing.
+// The compare is not atomic. The host's store contract has no compare-and-swap
+// member, so a write the read does not show yet (the host caches a row per
+// process) or one that lands after the compare is still lost. The
+// "(mf1-residual)" cases at the end of this file pin that open gap and are
+// marked as expected failures until the host offers such a member.
 //
 // Rule 2 (plain-object row): a missing or null row reads as an empty row. Any
 // other stored value that is not a plain object (a string, number, boolean,
 // array or class instance) is refused with LINKEDIN_CONFIG_ROW_INVALID by every
 // action that reads the row; nothing is written over it.
+//
+// Provider identity: the store and the manage guard come only from the provider
+// registered under the host's own identity, never from the first provider
+// listed (the "(note7-*)" cases at the end of this file).
 import { describe, expect, it, vi } from "vitest";
 import { register } from "../register";
 
 type UiAction = { id: string; handler: (input?: unknown) => Promise<unknown> };
 
 const KEY = "linkedin";
+// The identity the host registers its own providers under. The host binds every
+// provider an extension registers to that extension's own package name and
+// refuses this one, so a provider listed under it is the host's.
+const HOST_PKG = "@cinatra-ai/host";
 
 /** A store whose backing value can be changed by a simulated second writer
  *  right after a given read returns. `present: false` is a missing row. */
@@ -58,7 +71,7 @@ function makeCtx(initial: { present: boolean; value?: unknown }) {
       registerProvider: () => {},
       resolveProviders: (capability: string) => {
         const impl = services[capability];
-        return impl ? [{ packageName: "host", impl }] : [];
+        return impl ? [{ packageName: HOST_PKG, impl }] : [];
       },
     },
     ui: {
@@ -270,4 +283,192 @@ describe("rule 2: a stored row that is not a plain object is refused", () => {
     expect(store.write).toHaveBeenCalledTimes(1);
     expect(store.state.value).toEqual({ clientId: "a", clientSecret: "z", accounts: [{ id: "x" }] });
   });
+});
+
+// MF1 residual (OPEN): the re-read compare is not atomic. The host caches a
+// connector row per process for 10 s (a cache hit returns the cached row, and a
+// write refreshes only the writing process's cache) and its store contract has
+// only read, write and delete. So the connector cannot close the two races below
+// by itself; closing them needs a compare-and-swap member on the host's
+// connector-config service. Each case asserts what such a member gives and is
+// marked `it.fails`: it is an expected failure now and turns into a reported
+// failure once the gap is closed, so the mark is then removed.
+const CACHE_TTL_MS = 10_000;
+
+/** One backing row shared by every process, and this process's read cache. */
+function makeCachedStore(initial: Record<string, unknown>) {
+  const db = { value: structuredClone(initial) };
+  let now = 0;
+  let cached: { value: Record<string, unknown>; at: number } | undefined;
+  const read = vi.fn(<T,>(_id: string, _fallback: T): T => {
+    if (!cached || now - cached.at >= CACHE_TTL_MS) cached = { value: structuredClone(db.value), at: now };
+    return structuredClone(cached.value) as T;
+  });
+  const write = vi.fn((_id: string, value: unknown) => {
+    db.value = structuredClone(value) as Record<string, unknown>;
+    cached = { value: structuredClone(db.value), at: now };
+  });
+  const del = vi.fn();
+  return {
+    svc: { read, write, delete: del },
+    db,
+    /** Another process writes the backing row; this process's cache does not show it. */
+    otherProcessWrites(value: Record<string, unknown>) {
+      db.value = structuredClone(value);
+    },
+    advance(ms: number) {
+      now += ms;
+    },
+  };
+}
+
+function makeCachedCtx(initial: Record<string, unknown>) {
+  const store = makeCachedStore(initial);
+  const services: Record<string, unknown> = {
+    "@cinatra-ai/host:connector-config": store.svc,
+    "@cinatra-ai/host:extension-action-guard": { require: vi.fn(async () => {}) },
+  };
+  const actions = new Map<string, UiAction>();
+  const ctx = {
+    capabilities: {
+      registerProvider: () => {},
+      resolveProviders: (capability: string) => {
+        const impl = services[capability];
+        return impl ? [{ packageName: HOST_PKG, impl }] : [];
+      },
+    },
+    ui: {
+      registerSetupSurface: () => {},
+      registerSettingsSurface: () => {},
+      registerAction: (a: UiAction) => {
+        actions.set(a.id, a);
+      },
+    },
+  };
+  register(ctx as unknown as Parameters<typeof register>[0]);
+  const call = (id: string, input?: unknown) => {
+    const a = actions.get(id);
+    if (!a) throw new Error(`action ${id} not registered`);
+    return a.handler(input);
+  };
+  return { call, store };
+}
+
+const outcomeOf = (p: Promise<unknown>) =>
+  p.then(
+    () => "done",
+    (e: unknown) => (e as { code?: string }).code ?? String(e),
+  );
+
+describe("MF1 residual (OPEN host need): the re-read compare is not atomic", () => {
+  for (const action of ["saveConnection", "clearConnection"] as const) {
+    it.fails(
+      `(mf1-residual) ${action}: a write by another process that the cached read does not show is kept (needs a compare-and-swap on the host's connector-config service)`,
+      async () => {
+        const c = makeCachedCtx({ ...STORED });
+        // The form loads: this process reads the row and the host caches it.
+        await expect(c.call("currentConfig")).resolves.toMatchObject({ clientId: "a" });
+        // The LinkedIn connector, in another process, adds an account to the row.
+        c.store.otherProcessWrites({ ...STORED, accounts: ACCOUNTS_AFTER_SECOND_WRITER });
+        // The action runs 2 s later, inside the cache window.
+        c.store.advance(2_000);
+        const outcome = await outcomeOf(c.call(action, { clientSecret: "z" }));
+        expect(["done", "LINKEDIN_CONFIG_CONFLICT"]).toContain(outcome);
+        // What a compare-and-swap gives: the other process's account is not lost.
+        expect(c.store.db.value.accounts).toEqual(ACCOUNTS_AFTER_SECOND_WRITER);
+      },
+    );
+
+    it.fails(
+      `(mf1-residual) ${action}: a write that lands after the compare and before the write is kept (needs a compare-and-swap on the host's connector-config service)`,
+      async () => {
+        const { call, store } = makeCtx({ present: true, value: STORED });
+        // Read 1 computes the change and read 2 is the compare; the other write lands right after the compare.
+        store.secondWriter((n) => {
+          if (n === 2) store.state.value = { ...STORED, accounts: ACCOUNTS_AFTER_SECOND_WRITER };
+        });
+        const outcome = await outcomeOf(call(action, { clientSecret: "z" }));
+        expect(["done", "LINKEDIN_CONFIG_CONFLICT"]).toContain(outcome);
+        // What a compare-and-swap gives: the other writer's account is not lost.
+        expect((store.state.value as { accounts?: unknown }).accounts).toEqual(ACCOUNTS_AFTER_SECOND_WRITER);
+      },
+    );
+  }
+});
+
+// NOTE 7: the capability providers are a trust input. A shadow provider listed
+// BEFORE the host's must not receive a secret and must not decide the manage
+// guard.
+function makeOrderedCtx(opts: { hostListed: boolean; hostGuardDenies?: boolean }) {
+  const hostStore = makeStore({ present: true, value: STORED });
+  const shadowStore = makeStore({ present: true, value: STORED });
+  const hostGuard = {
+    require: vi.fn(async () => {
+      if (opts.hostGuardDenies) throw new Error("manage denied");
+    }),
+  };
+  const shadowGuard = { require: vi.fn(async () => {}) };
+  const SHADOW = "@example/shadow-provider";
+  const lists: Record<string, Array<{ packageName: string; impl: unknown }>> = {
+    "@cinatra-ai/host:connector-config": [
+      { packageName: SHADOW, impl: shadowStore.svc },
+      ...(opts.hostListed ? [{ packageName: HOST_PKG, impl: hostStore.svc }] : []),
+    ],
+    "@cinatra-ai/host:extension-action-guard": [
+      { packageName: SHADOW, impl: shadowGuard },
+      ...(opts.hostListed ? [{ packageName: HOST_PKG, impl: hostGuard }] : []),
+    ],
+  };
+  const actions = new Map<string, UiAction>();
+  const ctx = {
+    capabilities: {
+      registerProvider: () => {},
+      resolveProviders: (capability: string) => [...(lists[capability] ?? [])],
+    },
+    ui: {
+      registerSetupSurface: () => {},
+      registerSettingsSurface: () => {},
+      registerAction: (a: UiAction) => {
+        actions.set(a.id, a);
+      },
+    },
+  };
+  register(ctx as unknown as Parameters<typeof register>[0]);
+  const call = (id: string, input?: unknown) => {
+    const a = actions.get(id);
+    if (!a) throw new Error(`action ${id} not registered`);
+    return a.handler(input);
+  };
+  return { call, hostStore, shadowStore, hostGuard, shadowGuard };
+}
+
+describe("NOTE 7: a shadow provider listed before the host provider is never used", () => {
+  it("(note7-1) saveConnection writes the secret only to the host store and asks only the host guard", async () => {
+    const c = makeOrderedCtx({ hostListed: true });
+    await expect(c.call("saveConnection", { clientId: "b", clientSecret: "z" })).resolves.toEqual({ banner: "saved" });
+    expect(c.shadowStore.write).not.toHaveBeenCalled();
+    expect(c.shadowStore.read).not.toHaveBeenCalled();
+    expect(c.shadowGuard.require).not.toHaveBeenCalled();
+    expect(c.hostGuard.require).toHaveBeenCalledWith("@cinatra-ai/linkedin-oauth-connector", "manage");
+    expect(c.hostStore.write).toHaveBeenCalledTimes(1);
+    expect(c.hostStore.state.value).toEqual({ ...STORED, clientId: "b", clientSecret: "z" });
+  });
+
+  for (const action of ["saveConnection", "clearConnection", "currentConfig"] as const) {
+    it(`(note7-2) ${action}: a shadow guard that allows does not bypass a host guard that denies`, async () => {
+      const c = makeOrderedCtx({ hostListed: true, hostGuardDenies: true });
+      await expect(c.call(action, { clientId: "b", clientSecret: "z" })).rejects.toThrow("manage denied");
+      expect(c.shadowStore.write).not.toHaveBeenCalled();
+      expect(c.hostStore.write).not.toHaveBeenCalled();
+    });
+  }
+
+  for (const action of ["saveConnection", "clearConnection", "currentConfig", "connectionStatus"] as const) {
+    it(`(note7-3) ${action}: with no provider of the host identity the action refuses and the shadow store is never read or written`, async () => {
+      const c = makeOrderedCtx({ hostListed: false });
+      await expect(c.call(action, { clientId: "b", clientSecret: "z" })).rejects.toThrow();
+      expect(c.shadowStore.read).not.toHaveBeenCalled();
+      expect(c.shadowStore.write).not.toHaveBeenCalled();
+    });
+  }
 });

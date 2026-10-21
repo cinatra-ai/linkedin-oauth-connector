@@ -40,7 +40,7 @@ function makeCtx(opts: {
       registerProvider: () => {},
       resolveProviders: (capability: string) => {
         const impl = services[capability];
-        return impl ? [{ packageName: "host", impl }] : [];
+        return impl ? [{ packageName: "@cinatra-ai/host", impl }] : [];
       },
     },
     ui: {

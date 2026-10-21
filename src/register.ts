@@ -16,24 +16,29 @@
 // this form owns (clientId, clientSecret, organizationPosting).
 //
 // Two rules guard those writes (pinned by src/__tests__/register-row-cas.test.ts):
-// - Compare-and-set: the store contract (read / write / delete) offers no
-//   atomic update, so a write lands only when the row read again right before
-//   it equals the row the change was computed from. On a difference the change
-//   is computed again on the fresh row, at most three times; then the action
-//   refuses with LINKEDIN_CONFIG_CONFLICT and writes nothing. The compare and
-//   the write run with no await between them, so no other handler of this
-//   process can interleave. The compare sees only what the store's read
-//   returns: a write by another process that the read does not show yet (the
-//   host may cache a row per process), or that lands between the compare and
-//   the write, is not seen. Closing that needs an atomic member in the host
-//   contract, which it does not have.
+// - Re-read compare (NOT atomic): the store contract (read / write / delete)
+//   offers no atomic update, so a write lands only when the row read again
+//   right before it equals the row the change was computed from. On a
+//   difference the change is computed again on the fresh row, at most three
+//   times; then the action refuses with LINKEDIN_CONFIG_CONFLICT and writes
+//   nothing. The compare and the write run with no await between them, so no
+//   other handler of this process can interleave. The compare sees only what
+//   the store's read returns: a write by another process that the read does not
+//   show yet (the host caches a row per process for 10 s), or that lands
+//   between the compare and the write, is lost. This stays OPEN until the host
+//   contract gains a compare-and-swap member on its connector-config service;
+//   the "(mf1-residual)" cases pin it.
 // - Plain-object row: a missing or null row reads as an empty row. Any other
 //   stored value that is not a plain object is refused with
 //   LINKEDIN_CONFIG_ROW_INVALID by every action that reads the row, and is
-//   never written over.
+//   never written over. A stored text that does not parse reaches this code
+//   as the fallback the read was given, exactly like a missing row, so it reads
+//   as an empty row too. Refusing it stays OPEN until the host read can report
+//   an unparseable row apart from a missing one.
 //
 // SDK imports are TYPE-ONLY (the serverEntry graph bans SDK value imports);
-// host services come through the capability registry.
+// host services come through the capability registry, and only from the
+// provider registered under the host's own identity (hostProvider).
 
 import type { ExtensionHostContext, HostConnectorConfigService } from "@cinatra-ai/sdk-extensions";
 
@@ -57,9 +62,23 @@ type LinkedInConnectorConfig = Record<string, unknown> & {
   redirectUri?: unknown;
 };
 
+/** The identity the host registers its own providers under. The host binds
+ *  every provider an extension registers to that extension's own package name
+ *  and refuses this one, so a provider listed under it is the host's. */
+const HOST_PROVIDER_PACKAGE = "@cinatra-ai/host";
+
+/** The host's provider of a capability, never the first one listed: a
+ *  provider of another package (listed before the host's or alone) is not
+ *  used, so it never receives a secret and never decides the manage guard. */
+function hostProvider(ctx: ExtensionHostContext, capability: string): { impl: unknown } | undefined {
+  return ctx.capabilities
+    .resolveProviders(capability)
+    .find((p) => p.packageName === HOST_PROVIDER_PACKAGE);
+}
+
 /** Lazy per-concern host-service resolution (fail-loud on a missing service). */
 function hostService<T>(ctx: ExtensionHostContext, capability: string): T {
-  const provider = ctx.capabilities.resolveProviders(capability)[0];
+  const provider = hostProvider(ctx, capability);
   if (!provider) {
     throw new Error(
       `${PACKAGE_NAME}: host service "${capability}" is not registered — ` +
@@ -69,7 +88,7 @@ function hostService<T>(ctx: ExtensionHostContext, capability: string): T {
   return provider.impl as T;
 }
 
-/** The number of compare-and-set attempts before a write refuses. */
+/** The number of re-read compare attempts before a write refuses. */
 const MAX_WRITE_ATTEMPTS = 3;
 
 /** A write that met a changed row on every attempt. */
@@ -137,8 +156,8 @@ export function register(ctx: ExtensionHostContext): void {
   const readRow = (s: HostConnectorConfigService = store()): LinkedInConnectorConfig =>
     plainRow(s.read<unknown>(LINKEDIN_CONFIG_KEY, null));
 
-  // Compare-and-set (see the header): compute `change` on the row read now,
-  // read the row again, and write only when the two are equal.
+  // Re-read compare (see the header; not atomic): compute `change` on the row
+  // read now, read the row again, and write only when the two are equal.
   const writeRow = (change: (current: LinkedInConnectorConfig) => LinkedInConnectorConfig): void => {
     const s = store();
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
@@ -156,9 +175,7 @@ export function register(ctx: ExtensionHostContext): void {
   // Resolve the host's action-guard service LAZILY at action-call time, so
   // activation order never matters and a missing guard FAILS CLOSED.
   const requireManage = async (): Promise<void> => {
-    const provider = ctx.capabilities.resolveProviders(
-      "@cinatra-ai/host:extension-action-guard",
-    )[0];
+    const provider = hostProvider(ctx, "@cinatra-ai/host:extension-action-guard");
     const guard = provider?.impl as HostActionGuard | undefined;
     if (!guard || typeof guard.require !== "function") {
       throw new Error(
@@ -206,7 +223,8 @@ export function register(ctx: ExtensionHostContext): void {
 
   // WRITE (manage-gated): merge the form's fields into the stored row. A blank
   // Client ID or secret keeps the stored value; the flag changes only when the
-  // form sends "true" or "false". The write is a compare-and-set (writeRow).
+  // form sends "true" or "false". The write goes through writeRow's re-read
+  // compare (not atomic; see the header).
   ctx.ui.registerAction({
     id: "saveConnection",
     handler: async (input: unknown): Promise<{ banner: string }> => {
