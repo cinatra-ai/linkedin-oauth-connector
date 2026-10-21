@@ -109,4 +109,39 @@ describe("saveLinkedInOAuthConnectionAction", () => {
     expect(value.clientId).toBe("keep-id");
     expect(value.clientSecret).toBe("new-sec");
   });
+
+  it("stores organizationPosting true when the Community Management box is ticked", async () => {
+    await run(form({ clientId: "cm-id", clientSecret: "cm-sec", organizationPosting: "true" }));
+    const [, , value] = setExtensionConnectorConfig.mock.calls[0]! as [string, string, Record<string, unknown>];
+    expect(value.organizationPosting).toBe(true);
+  });
+
+  it("stores organizationPosting false when the box is unticked, even when it was on", async () => {
+    store.set("linkedin", { clientId: "cm-id", clientSecret: "cm-sec", organizationPosting: true });
+    await run(form({ clientId: "", clientSecret: "" }));
+    const [, , value] = setExtensionConnectorConfig.mock.calls[0]! as [string, string, Record<string, unknown>];
+    expect(value.organizationPosting).toBe(false);
+    expect(value.clientId).toBe("cm-id");
+    expect(value.clientSecret).toBe("cm-sec");
+  });
+
+  it("keeps accounts / loggingEnabled / redirectUri when the organizationPosting box is saved", async () => {
+    store.set("linkedin", {
+      clientId: "old-id",
+      clientSecret: "old-sec",
+      redirectUri: "https://nango.example/callback",
+      loggingEnabled: true,
+      accounts: [{ id: "acc-1", name: "Ada" }],
+    });
+    await run(form({ clientId: "cm-id", clientSecret: "cm-sec", organizationPosting: "true" }));
+    const [, , value] = setExtensionConnectorConfig.mock.calls[0]! as [string, string, Record<string, unknown>];
+    expect(value).toMatchObject({
+      clientId: "cm-id",
+      clientSecret: "cm-sec",
+      organizationPosting: true,
+      redirectUri: "https://nango.example/callback",
+      loggingEnabled: true,
+      accounts: [{ id: "acc-1", name: "Ada" }],
+    });
+  });
 });

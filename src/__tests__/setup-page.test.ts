@@ -184,3 +184,22 @@ describe("LinkedInOAuthConnectorSetupPage — tabbed layout (#34)", () => {
     expect(findAll(helpContent, "button")).toHaveLength(0);
   });
 });
+
+describe("LinkedInOAuthConnectorSetupPage — organizationPosting flag", () => {
+  async function administrationFrom(props: unknown): Promise<Record<string, unknown> | undefined> {
+    const tree = await Page(props as never);
+    return find(tree, h.Form)?.props.administration as Record<string, unknown> | undefined;
+  }
+
+  it("passes the stored organizationPosting flag to the settings form", async () => {
+    h.getExtensionConnectorConfig.mockReturnValueOnce({ clientId: "cm-id", organizationPosting: true });
+    const administration = await administrationFrom(makeCtx({}));
+    expect(administration?.organizationPosting).toBe(true);
+    expect(administration?.clientId).toBe("cm-id");
+  });
+
+  it("reads a missing organizationPosting flag as off", async () => {
+    const administration = await administrationFrom(makeCtx({}));
+    expect(administration?.organizationPosting).toBe(false);
+  });
+});
