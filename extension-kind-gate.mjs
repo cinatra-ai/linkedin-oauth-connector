@@ -29,8 +29,9 @@
 //   COMMON (every kind):
 //     - manifest shape: cinatra.kind ∈ the four kinds; cinatra.apiVersion ===
 //       "cinatra.ai/v1"; cinatra.dependencies is an array of well-formed
-//       ExtensionDependency entries (mirrors extension-deps-gate.mjs +
-//       inventory.isValidExtensionDependency).
+//       ExtensionDependency entries, INCLUDING the optional skill-edge `role`
+//       (mirrors extension-deps-gate.mjs + inventory.isValidExtensionDependency
+//       + the install-time validateExtensionDependencyShape authority).
 //     - port names: every cinatra.requestedHostPorts entry is a real
 //       HOST_PORT_NAME (mirrors sdk-extensions host-context.HOST_PORT_NAMES).
 //     - sdkAbiRange grammar: a declared range parses to supported bounds
@@ -74,11 +75,17 @@
 //     - artifact  → name @cinatra-ai/<slug>-artifact; kind:"artifact"; NO
 //                    cinatra.oas; mandatory valid cinatra.artifact descriptor;
 //                    cinatra block carries only {kind,apiVersion,artifact,
-//                    dependencies,roles,displayName,vendor} (mirrors
-//                    artifact-handler.validate + the shared
-//                    ARTIFACT_ALLOWED_CINATRA_KEYS; displayName + vendor are
-//                    cross-kind presentation/byline metadata).
-//     - skill     → name ends `-skills`; kind:"skill" (mirrors the kind-at-end
+//                    dependencies,roles,displayName,vendor,views,fieldRenderers,
+//                    dashboardContribution} (mirrors artifact-handler.validate +
+//                    the shared ARTIFACT_ALLOWED_CINATRA_KEYS; displayName +
+//                    vendor are cross-kind presentation/byline metadata; views is
+//                    the S9-a chat-view declaration surface, cinatra#1626;
+//                    fieldRenderers is the artifact field-renderer surface;
+//                    dashboardContribution is the dashboard-pack carrier
+//                    re-homed to the artifact kind, cinatra#1896/#2005).
+//     - skill     → name ends `-skill` (the CANONICAL singular suffix; the
+//                    retired plural `-skills` is still accepted while the
+//                    migration runs); kind:"skill" (mirrors the kind-at-end
 //                    naming-conformance rule for skills).
 //   (The `workflow` kind is RETIRED: a package declaring cinatra.kind:"workflow"
 //    is rejected as an unknown kind — there is no workflow per-kind gate.)
@@ -103,18 +110,9 @@
 //
 // Exit codes: 0 clean / pass · 1 one or more violations.
 // ---------------------------------------------------------------------------
-// >>> ERT-MIRROR-ONLY-BEGIN: vendoring note (stripped by the canonical projection) >>>
-// The release tooling VENDORS the cinatra-cli canonical gate above and ships it
-// into monorepo-EXTRACTED repos. The ONLY local edits are the fenced
-// `ERT-MIRROR-ONLY` blocks below (the hot-installability UI-surface classifier +
-// its connector advisory). Everything OUTSIDE these fences MUST stay
-// byte-identical to the cinatra-cli canonical — a scheduled drift audit strips
-// these fences and diffs the result against the live canonical. Change the
-// canonical upstream (cinatra-cli), then re-sync here; do not diverge locally.
-// <<< ERT-MIRROR-ONLY-END: vendoring note <<<
 
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { resolve, join, dirname, relative, normalize, isAbsolute, sep } from "node:path";
+import { resolve, join, basename, dirname, relative, normalize, isAbsolute, sep } from "node:path";
 
 // ===========================================================================
 // arg parsing
@@ -170,6 +168,14 @@ export const FIRST_PARTY_SCOPE = "@cinatra-ai";
 // inventory dependency enums.
 const VALID_DEPENDENCY_EDGE_TYPES = new Set(["runtime", "install-time", "peer"]);
 const VALID_DEPENDENCY_REQUIREMENTS = new Set(["required", "optional"]);
+
+// The declared skill-edge ROLE vocabulary (cinatra#2090 S3) — mirrors
+// canonical-types.DEPENDENCY_SKILL_ROLES. A consumer may declare SEVERAL skill
+// edges (an artifact extension declares both the rules its classifier follows
+// and the methodology the chat follows when a user asks it to author one), so
+// the edge has to say WHICH host surface it feeds. OPTIONAL and additive: every
+// edge authored before the vocabulary stays valid.
+const VALID_DEPENDENCY_SKILL_ROLES = new Set(["matcher", "authoring"]);
 
 // sdk-extensions register.SDK_EXTENSIONS_ABI_VERSION — used only for the
 // advisory ABI-compat WARNING (host-side runtime verdict, not author-time validity).
@@ -322,10 +328,37 @@ export function readPackageJson(packageRoot) {
   return JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 }
 
+/** The optional skill-edge `role` on ONE cinatra.dependencies entry. Returns a
+ * precise problem string, or null when the role is absent or valid. Mirrors the
+ * install-time authority `validateExtensionDependencyShape` exactly, including
+ * the ORDER of its two checks: an unknown VALUE is reported before the
+ * target-kind mismatch.
+ *
+ * Fail-LOUD rather than ignore-unknown, because both failure modes are silent
+ * at runtime: a typo'd role simply stops resolving, and a consumer whose
+ * `matcher` edge does not resolve classifies NOTHING at all.
+ *
+ * The rule keys on the TARGET KIND only — a role is meaningful solely on a
+ * kind:"skill" edge. `edgeType` is deliberately NOT part of it: the authority
+ * does not constrain it, so a role on an install-time or peer skill edge is a
+ * valid SHAPE here exactly as it is at install, and a gate that refused one
+ * would reject a manifest the host accepts. */
+export function dependencyRoleProblem(dep) {
+  if (!dep || typeof dep !== "object" || dep.role === undefined) return null;
+  if (!VALID_DEPENDENCY_SKILL_ROLES.has(dep.role)) {
+    return `role, when present, must be one of ${[...VALID_DEPENDENCY_SKILL_ROLES].join("|")} (got ${JSON.stringify(dep.role)})`;
+  }
+  if (dep.kind !== "skill") {
+    return `role is only meaningful on a kind:"skill" edge (got kind ${JSON.stringify(dep.kind ?? null)})`;
+  }
+  return null;
+}
+
 /** Validate ONE cinatra.dependencies entry. Mirrors the install-time
  * `validateExtensionDependencyShape` (packages/extensions/src/manifest-dependencies):
- * right shape + a self-edge is MALFORMED. (The cross-package kind-match + the
- * duplicate-packageName check need the full list — done in validateCommon.) */
+ * right shape + a self-edge is MALFORMED + a well-formed optional `role`. (The
+ * cross-package kind-match + the duplicate-packageName check need the full list
+ * — done in validateCommon.) */
 export function isValidDependencyEntry(dep, selfName = null) {
   if (!dep || typeof dep !== "object") return false;
   if (typeof dep.packageName !== "string" || dep.packageName.length === 0) return false;
@@ -344,6 +377,7 @@ export function isValidDependencyEntry(dep, selfName = null) {
     return false;
   }
   if (dep.kind !== undefined && !VALID_KINDS.includes(dep.kind)) return false;
+  if (dependencyRoleProblem(dep) !== null) return false;
   return true;
 }
 
@@ -554,56 +588,120 @@ export function scanHostPeerValueImports(packageRoot, pkg, entryAbs) {
   return [...hits].sort();
 }
 
-// >>> ERT-MIRROR-ONLY-BEGIN: hot-installability UI-surface classifier (absent from the cinatra-cli canonical) >>>
 // ===========================================================================
-// Hot-installability UI-surface classifier — mirror of the host
-// `classifyUiSurface` (cinatra scripts/extensions/generate-extension-manifest.mjs).
+// Dead app-route guard.
 //
-// A connector is HOT-installable (no app rebuild) only when its setup surface is
-// declarative: `cinatra.uiSurface:"schema-config"` (+ a `cinatra.configSchema`)
-// or a facade/no-UI connector. A connector whose setup page is a BUNDLED REACT
-// component (`cinatra.uiSurface:"bundled-react"`, or the legacy heuristic of a
-// bespoke `src/setup-page.tsx` / `src/settings-page.tsx`) is base-image-only —
-// the host raises ConnectorRequiresRebuildError and it is NOT hot-installable.
+// Skill/README/authoring content frequently links the user to a Cinatra app
+// route (e.g. "[Open settings](/settings)"). When the app renames or removes a
+// route, those links rot silently — the assistant then sends users to a 404.
+// This guard fails the gate on any reference to a KNOWN-DEAD top-level app
+// route in a markdown file, with the live replacement, so a new (or stale)
+// skill that names a dead route cannot pass CI.
 //
-// This classifier is PURE over the manifest's cinatra block + presence flags so
-// it can be reused by the report + the validator WITHOUT re-running the gate
-// (no recursion into runGate). Only `connector` has a UI surface — every other
-// kind is declarative ⇒ classified `null` (hot).
+// Grounded against the cinatra app router (src/app/*) — only routes verified
+// REMOVED are listed; live routes (e.g. /workflows, which still exists) are
+// deliberately NOT listed to avoid false failures. Each entry matches a
+// route-shaped reference (start-of-line or a markdown/string/bracket delimiter
+// before it; a non-path terminator after it) so it does not fire on a legit
+// nested route such as /teams/{teamId}/settings or on /settings/connections,
+// which has its own (more specific) rule. Matches inside fenced code blocks are
+// skipped (illustrative, not live links); backticked inline references DO fire.
+//
+// The prefix also catches an ABSOLUTE cinatra app URL (e.g.
+// https://app.cinatra.ai/settings) — a delimiter alone would miss it because a
+// hostname char sits right before the path. To avoid flagging unrelated
+// third-party URLs that merely share a path, the host form is scoped to a
+// cinatra app host (…cinatra.ai or …cinatra.app, optionally with a subdomain).
+// The host is LEFT-BOUNDED (`//`, `@`, or a label-dot before the cinatra label)
+// so a look-alike like `evilcinatra.ai` does NOT match, and an optional `:port`
+// is tolerated (e.g. https://cinatra.ai:443/settings). Out of scope (rare in
+// skill prose, and adding them risks false-positives): routes that live in a
+// URL query (`?next=/settings`) or fragment (`#/settings`) — the assistant
+// surfaces a bare path or an absolute app URL, not a re-encoded one.
 // ===========================================================================
+const CINATRA_HOST = String.raw`(?:/{2}|@|[A-Za-z0-9-]+\.)(?:[A-Za-z0-9-]+\.)*cinatra\.(?:ai|app)(?::\d+)?`;
+const ROUTE_PREFIX = String.raw`(?:^|[\s([{"'\`<]|${CINATRA_HOST})`;
+// Terminator AFTER the route: end, whitespace, or a delimiter — but for the
+// bare /settings rule, a following "/" is NOT allowed (so /settings/connections
+// is only reported by its own, more specific rule, never duplicated here).
+const ROUTE_END_NO_SLASH = String.raw`(?=$|[\s)\]}'"\`>,.;:!?#])`;
+const ROUTE_END_WITH_SLASH = String.raw`(?=$|[/?#\s)\]}'"\`>,.;:!?])`;
 
-/** Filesystem presence flags the host derives in `entryFlags` (the bundled-react
- * heuristic when no `cinatra.uiSurface` is declared). */
-export function readConnectorUiFlags(packageRoot) {
-  return {
-    hasSetupPage: existsSync(join(packageRoot, "src", "setup-page.tsx")),
-    hasSettingsPage: existsSync(join(packageRoot, "src", "settings-page.tsx")),
-  };
+export const DEAD_APP_ROUTES = [
+  { route: "/settings/connections", replacement: "/connectors", pattern: new RegExp(`${ROUTE_PREFIX}(/settings/connections)${ROUTE_END_WITH_SLASH}`, "g") },
+  { route: "/settings", replacement: "/account", pattern: new RegExp(`${ROUTE_PREFIX}(/settings)${ROUTE_END_NO_SLASH}`, "g") },
+  { route: "/agents/registry", replacement: "/configuration/marketplace", pattern: new RegExp(`${ROUTE_PREFIX}(/agents/registry)${ROUTE_END_WITH_SLASH}`, "g") },
+  // The standalone run-agent picker page was removed (not redirected, by
+  // design — cinatra-ai/cinatra#1007): the picker now lives on the /agents
+  // "All Agents" tab. WITH_SLASH deliberately covers the removed page's whole
+  // subtree. The dynamic /agents/<vendor>/<slug>/<instanceId> routes stay
+  // live and would collide only if a vendor were literally named "run" —
+  // no cinatra vendor is (vendors are npm-scope-shaped names such as
+  // cinatra-ai); narrow this rule to NO_SLASH if one ever appears.
+  { route: "/agents/run", replacement: "/agents", pattern: new RegExp(`${ROUTE_PREFIX}(/agents/run)${ROUTE_END_WITH_SLASH}`, "g") },
+];
+
+/** Yield checkable markdown lines (outside fenced code blocks) as
+ * { lineno, text } from `rawText`. Inline `code spans` are kept — a backticked
+ * dead route is still a dead route the assistant will surface. */
+export function* iterMarkdownLines(rawText) {
+  let inFence = false;
+  let lineno = 0;
+  for (const raw of rawText.split(/\r?\n/)) {
+    lineno += 1;
+    const t = raw.trimStart();
+    if (t.startsWith("```") || t.startsWith("~~~")) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    yield { lineno, text: raw };
+  }
 }
 
-/**
- * Classify a connector's UI surface. Mirrors host `classifyUiSurface` EXACTLY:
- *   uiSurface:"schema-config" → "schema-config" (hot)
- *   uiSurface:"bundled-react" → "bundled-react" (NOT hot — base-image-only)
- *   else hasSetupPage || hasSettingsPage → "bundled-react" (legacy heuristic)
- *   else → null (facade/runtime connector — hot)
- * A non-connector kind is always `null` (declarative kinds are always hot).
- *
- * @param {string} kind the manifest `cinatra.kind`
- * @param {object} cinatra the manifest `cinatra` block
- * @param {{hasSetupPage:boolean, hasSettingsPage:boolean}} flags
- * @returns {"schema-config"|"bundled-react"|null}
- */
-export function classifyConnectorUiSurface(kind, cinatra, flags) {
-  if (kind !== "connector") return null;
-  const cin = isObj(cinatra) ? cinatra : {};
-  if (cin.uiSurface === "schema-config") return "schema-config";
-  if (cin.uiSurface === "bundled-react") return "bundled-react";
-  if (flags?.hasSetupPage || flags?.hasSettingsPage) return "bundled-react";
-  return null;
+/** Walk `.md` files under `dir`, skipping vendor/build dirs. */
+function walkMarkdownFiles(dir, acc = []) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return acc;
+  }
+  for (const e of entries) {
+    if (e.name === "node_modules" || e.name === ".git") continue;
+    if (["dist", "build", ".next", "coverage"].includes(e.name)) continue;
+    const full = join(dir, e.name);
+    if (e.isDirectory()) walkMarkdownFiles(full, acc);
+    else if (/\.md$/i.test(e.name)) acc.push(full);
+  }
+  return acc;
 }
 
-// <<< ERT-MIRROR-ONLY-END: hot-installability UI-surface classifier <<<
+/** Scan every markdown file under `packageRoot` for references to a known-dead
+ * app route. Returns an array of human-readable error strings (file:line + the
+ * live replacement). Self-contained; no host dependency. */
+export function validateNoDeadAppRoutes(packageRoot) {
+  const errors = [];
+  for (const file of walkMarkdownFiles(packageRoot)) {
+    let raw;
+    try {
+      raw = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    const rel = relative(packageRoot, file) || basename(file);
+    for (const { lineno, text } of iterMarkdownLines(raw)) {
+      for (const { route, replacement, pattern } of DEAD_APP_ROUTES) {
+        pattern.lastIndex = 0;
+        if (pattern.test(text)) {
+          errors.push(`${rel}:${lineno} references dead app route ${route} — use ${replacement} (the route was renamed/removed in the cinatra app)`);
+        }
+      }
+    }
+  }
+  return errors;
+}
+
 /** The common (all-kinds) validation. Returns { errors:[], warnings:[] }. */
 export function validateCommon(packageRoot) {
   const errors = [];
@@ -637,7 +735,16 @@ export function validateCommon(packageRoot) {
     const seenDeps = new Set();
     cinatra.dependencies.forEach((dep, i) => {
       if (!isValidDependencyEntry(dep, selfPkgName)) {
-        errors.push(`cinatra.dependencies[${i}] is malformed: need {packageName (not self), edgeType∈{runtime,install-time,peer}, versionConstraint:{kind∈{semver-range,exact,git-ref},…}, requirement∈{required,optional}[, kind]} (got ${JSON.stringify(dep)})`);
+        // Report a role problem PRECISELY. The generic shape message would send
+        // an author hunting through an otherwise well-formed edge for a typo in
+        // one optional field; the entry JSON rides along either way, so a second
+        // problem in the same entry is still visible.
+        const roleProblem = dependencyRoleProblem(dep);
+        errors.push(
+          roleProblem !== null
+            ? `cinatra.dependencies[${i}] is malformed: ${roleProblem} (got ${JSON.stringify(dep)})`
+            : `cinatra.dependencies[${i}] is malformed: need {packageName (not self), edgeType∈{runtime,install-time,peer}, versionConstraint:{kind∈{semver-range,exact,git-ref},…}, requirement∈{required,optional}[, kind][, role∈{matcher,authoring} on a kind:"skill" edge]} (got ${JSON.stringify(dep)})`,
+        );
         return;
       }
       if (seenDeps.has(dep.packageName)) {
@@ -697,26 +804,6 @@ export function validateCommon(packageRoot) {
     }
   }
 
-  // >>> ERT-MIRROR-ONLY-BEGIN: bundled-react hot-installability advisory (absent from the cinatra-cli canonical) >>>
-  // ---- hot-installability advisory (connector): a bundled-react setup surface
-  // is base-image-only, so the connector is NOT hot-installable (the host raises
-  // ConnectorRequiresRebuildError). This is a WARNING, never an error — a
-  // bundled-react connector stays a VALID extension during the cold→hot
-  // transition; the warning surfaces the follow-up (convert to schema-config).
-  if (cinatra.kind === "connector") {
-    const uiSurface = classifyConnectorUiSurface(cinatra.kind, cinatra, readConnectorUiFlags(packageRoot));
-    if (uiSurface === "bundled-react") {
-      warnings.push(
-        'bundled-legacy: not hot-installable — this connector ships a bundled-react setup ' +
-          'surface (cinatra.uiSurface:"bundled-react" or a src/setup-page.tsx / src/settings-page.tsx ' +
-          'page), which is base-image-only. Convert to cinatra.uiSurface:"schema-config" + a ' +
-          'declarative cinatra.configSchema to make it hot-installable (see mcp-server-connector#4 ' +
-          "exemplar). Bundled-react stays valid during the transition.",
-      );
-    }
-  }
-
-  // <<< ERT-MIRROR-ONLY-END: bundled-react hot-installability advisory <<<
   // ---- 4 + 5 + 6. @/ ban, SDK-only deps (source + manifest) ----
   const sourceFiles = walkSourceFiles(packageRoot);
   const selfName = typeof pkg.name === "string" ? pkg.name : null;
@@ -731,9 +818,6 @@ export function validateCommon(packageRoot) {
     }
     for (const h of scanHostInternalImports(text)) hostInternal.add(h);
     for (const imp of parseModuleImports(text)) {
-      // This exact virtual module is served by the host, not a registry package.
-      // Subpaths and dependency declarations still take the ordinary SDK gate.
-      if (imp.specifier === "@cinatra-ai/design-primitives") continue;
       const base = basePackageOf(imp.specifier);
       if (base && base !== selfName && isSdkOnlyViolation(base)) sdkOnly.add(base);
     }
@@ -788,6 +872,9 @@ export function validateCommon(packageRoot) {
   // ---- 8. README + license ----
   errors.push(...validateReadmePresence(packageRoot, cinatra.kind));
   errors.push(...validateLicensePresence(pkg, warnings));
+
+  // ---- dead app-route guard (all kinds) ----
+  errors.push(...validateNoDeadAppRoutes(packageRoot));
 
   return { errors, warnings };
 }
@@ -999,6 +1086,9 @@ const SCHEMA_CONFIG_FIELD_KINDS = new Set([
   "copyable-credential", "named-action",
   // cinatra#658 (PR-4) extended vocabulary.
   "select", "record-list", "banner", "advisory",
+  // cinatra#782 field-kind expansion: action-sourced select options, boolean
+  // toggle, numeric input, free-form string list.
+  "dynamic-select-options", "boolean", "number", "free-list",
 ]);
 // Exact per-kind key allowlists — mirror src/lib/extension-schema-config.ts /
 // generate-extension-manifest.mjs so a smuggled key is REJECTED at the gate too.
@@ -1009,7 +1099,7 @@ const SCHEMA_CONFIG_FIELD_KEYS = {
   "repeatable-list": new Set(["kind", "key", "label", "itemLabel", "itemFields", "description"]),
   "status-probe": new Set(["kind", "label", "actionId", "description"]),
   "copyable-credential": new Set(["kind", "key", "label", "description"]),
-  "named-action": new Set(["kind", "label", "actionId", "confirm", "description"]),
+  "named-action": new Set(["kind", "label", "actionId", "confirm", "role", "description"]),
   select: new Set(["kind", "key", "label", "options", "defaultValue", "description"]),
   "record-list": new Set([
     "kind", "label", "listActionId", "deleteActionId", "emptyState",
@@ -1017,14 +1107,30 @@ const SCHEMA_CONFIG_FIELD_KEYS = {
   ]),
   banner: new Set(["kind", "label", "variants"]),
   advisory: new Set(["kind", "label", "tone", "probeActionId", "whenReady", "whenNotReady", "description"]),
+  // cinatra#782 field-kind expansion (action-sourced select / boolean / number / free-list).
+  "dynamic-select-options": new Set([
+    "kind", "key", "label", "optionsAction", "defaultValue", "placeholder", "description",
+  ]),
+  boolean: new Set(["kind", "key", "label", "defaultValue", "description"]),
+  number: new Set([
+    "kind", "key", "label", "min", "max", "step", "defaultValue", "placeholder", "required", "description",
+  ]),
+  "free-list": new Set(["kind", "key", "label", "itemLabel", "placeholder", "description"]),
 };
-const SCHEMA_CONFIG_ROOT_KEYS = new Set(["title", "description", "fields"]);
+const SCHEMA_CONFIG_ROOT_KEYS = new Set(["title", "description", "fields", "tabs", "hydrateAction"]);
 const SCHEMA_CONFIG_BADGE_VARIANTS = new Set([
   "outline", "secondary", "destructive", "success", "warning", "info", "ghost", "muted",
 ]);
 const SCHEMA_CONFIG_BANNER_TONES = new Set([
   "default", "destructive", "warning", "success", "info",
 ]);
+// cinatra#1102 tab/section grouping: a tab carries ONLY {id,label,fields}.
+const SCHEMA_CONFIG_TAB_KEYS = new Set(["id", "label", "fields"]);
+/** A finite number (rejects NaN/±Infinity/non-number) — fail-closed, mirrors
+ *  the host parser's finiteNum. */
+function isFiniteNum(v) {
+  return typeof v === "number" && Number.isFinite(v);
+}
 
 function rejectUnknownConfigKeys(raw, allowed, at, errors) {
   let ok = true;
@@ -1048,7 +1154,9 @@ function validateConfigSchemaField(kind, raw, at, errors, seenKeys) {
   }
   const needsKey =
     kind === "text" || kind === "secret" || kind === "copyable-credential" ||
-    kind === "repeatable-list" || kind === "select";
+    kind === "repeatable-list" || kind === "select" ||
+    kind === "dynamic-select-options" || kind === "boolean" ||
+    kind === "number" || kind === "free-list";
   if (needsKey) {
     if (!nonEmptyStr(raw.key) || !SCHEMA_CONFIG_KEY_RE.test(raw.key)) {
       errors.push(`${at}: invalid or missing "key"`);
@@ -1065,6 +1173,11 @@ function validateConfigSchemaField(kind, raw, at, errors, seenKeys) {
   }
   if ((kind === "status-probe" || kind === "named-action") && (!nonEmptyStr(raw.actionId) || !SCHEMA_CONFIG_KEY_RE.test(raw.actionId))) {
     errors.push(`${at}: ${kind} requires a valid "actionId"`);
+  }
+  // Optional canonical connection-action role — a CLOSED allowlist (mirrors the
+  // host parser: role ∈ {connect, disconnect}). Absent → a plain named action.
+  if (kind === "named-action" && raw.role !== undefined && raw.role !== "connect" && raw.role !== "disconnect") {
+    errors.push(`${at}: named-action "role" must be "connect" or "disconnect" when present`);
   }
   if (kind === "repeatable-list") {
     const items = raw.itemFields;
@@ -1174,12 +1287,118 @@ function validateConfigSchemaField(kind, raw, at, errors, seenKeys) {
     if (!nonEmptyStr(raw.tone) || !SCHEMA_CONFIG_BANNER_TONES.has(raw.tone)) errors.push(`${at}: advisory requires a valid "tone"`);
     if (!nonEmptyStr(raw.whenReady) || !nonEmptyStr(raw.whenNotReady)) errors.push(`${at}: advisory requires "whenReady" and "whenNotReady"`);
   }
+  // ---- dynamic-select-options: a select whose OPTIONS are action-sourced
+  //      (cinatra#782) — the renderer fetches `optionsAction` at mount. Only
+  //      the action id is declared here; membership of `defaultValue` in the
+  //      fetched options can't be checked at this static-validation stage.
+  if (kind === "dynamic-select-options") {
+    if (!nonEmptyStr(raw.optionsAction) || !SCHEMA_CONFIG_KEY_RE.test(raw.optionsAction)) {
+      errors.push(`${at}: dynamic-select-options requires a valid "optionsAction"`);
+    }
+    if (raw.defaultValue !== undefined && !nonEmptyStr(raw.defaultValue)) {
+      errors.push(`${at}: dynamic-select-options "defaultValue" must be a non-empty string when present`);
+    }
+  }
+  // ---- boolean: a Switch toggle (cinatra#782). `defaultValue` is a real
+  //      boolean primitive, never a truthy stand-in.
+  if (kind === "boolean" && raw.defaultValue !== undefined && typeof raw.defaultValue !== "boolean") {
+    errors.push(`${at}: boolean "defaultValue" must be a boolean when present`);
+  }
+  // ---- number: a numeric input with optional min/max/step (cinatra#782).
+  //      Every bound must be a finite number; step must be positive; min<=max;
+  //      defaultValue (when present) must fall within [min, max].
+  if (kind === "number") {
+    for (const prop of ["min", "max", "step", "defaultValue"]) {
+      if (raw[prop] !== undefined && !isFiniteNum(raw[prop])) {
+        errors.push(`${at}: number "${prop}" must be a finite number when present`);
+      }
+    }
+    const min = isFiniteNum(raw.min) ? raw.min : undefined;
+    const max = isFiniteNum(raw.max) ? raw.max : undefined;
+    const step = isFiniteNum(raw.step) ? raw.step : undefined;
+    const defaultValue = isFiniteNum(raw.defaultValue) ? raw.defaultValue : undefined;
+    if (step !== undefined && step <= 0) {
+      errors.push(`${at}: number "step" must be greater than 0`);
+    }
+    if (min !== undefined && max !== undefined && min > max) {
+      errors.push(`${at}: number "min" must be <= "max"`);
+    }
+    if (
+      defaultValue !== undefined &&
+      ((min !== undefined && defaultValue < min) || (max !== undefined && defaultValue > max))
+    ) {
+      errors.push(`${at}: number "defaultValue" is outside [min, max]`);
+    }
+  }
+  // ---- free-list: an add/remove editor for a free-form string[] (cinatra#782).
+  //      No further shape beyond the allowlisted keys above.
+}
+
+/**
+ * Validate the optional root `tabs` key (cinatra#1102 — the tab/section
+ * grouping over the setup surface). Mirrors the host parser's `parseTabs`:
+ * fail-closed on an unknown per-tab key, a missing/invalid/duplicate id, a
+ * missing label, or an empty `fields`; field keys share the SAME `seenKeys`
+ * set as the base fields (one flat submit namespace). Shape only — the host
+ * render-time Help-tab-last reordering is not a validity rule.
+ */
+function validateConfigSchemaTabs(raw, errors, seenKeys) {
+  if (!Array.isArray(raw)) {
+    errors.push("configSchema.tabs must be an array");
+    return;
+  }
+  const seenTabIds = new Set();
+  raw.forEach((tab, i) => {
+    const at = `tabs[${i}]`;
+    if (!isObj(tab)) {
+      errors.push(`${at}: must be an object`);
+      return;
+    }
+    rejectUnknownConfigKeys(tab, SCHEMA_CONFIG_TAB_KEYS, at, errors);
+    if (!nonEmptyStr(tab.id) || !SCHEMA_CONFIG_KEY_RE.test(tab.id)) {
+      errors.push(`${at}: invalid or missing "id"`);
+      return;
+    }
+    if (seenTabIds.has(tab.id)) {
+      errors.push(`${at}: duplicate tab id ${JSON.stringify(tab.id)}`);
+      return;
+    }
+    seenTabIds.add(tab.id);
+    if (!nonEmptyStr(tab.label)) {
+      errors.push(`${at}: missing "label"`);
+      return;
+    }
+    if (!Array.isArray(tab.fields) || tab.fields.length === 0) {
+      errors.push(`${at}: tab requires a non-empty "fields" array`);
+      return;
+    }
+    tab.fields.forEach((field, j) => {
+      const fieldAt = `${at}.fields[${j}]`;
+      if (!isObj(field)) {
+        errors.push(`${fieldAt}: must be an object`);
+        return;
+      }
+      if (typeof field.kind !== "string" || !SCHEMA_CONFIG_FIELD_KINDS.has(field.kind)) {
+        errors.push(`${fieldAt}: unknown field kind ${JSON.stringify(field.kind)}`);
+        return;
+      }
+      validateConfigSchemaField(field.kind, field, fieldAt, errors, seenKeys);
+    });
+  });
 }
 
 export function validateConfigSchema(raw) {
   if (!isObj(raw)) return ["must be an object"];
   const errors = [];
   rejectUnknownConfigKeys(raw, SCHEMA_CONFIG_ROOT_KEYS, "configSchema", errors);
+  // Fail-closed like the host parser: a present-but-malformed hydrateAction is a
+  // validation error (same actionId grammar, identical error string).
+  if (
+    raw.hydrateAction !== undefined &&
+    (!nonEmptyStr(raw.hydrateAction) || !SCHEMA_CONFIG_KEY_RE.test(raw.hydrateAction))
+  ) {
+    errors.push(`configSchema: "hydrateAction" must be a valid actionId string`);
+  }
   if (!Array.isArray(raw.fields) || raw.fields.length === 0) {
     errors.push("fields must be a non-empty array");
     return errors;
@@ -1197,6 +1416,11 @@ export function validateConfigSchema(raw) {
     }
     validateConfigSchemaField(field.kind, field, at, errors, seenKeys);
   });
+  // Optional tab groups (cinatra#1102). Parsed with the SAME seenKeys set so a
+  // field key is unique across the base fields AND every tab.
+  if (raw.tabs !== undefined) {
+    validateConfigSchemaTabs(raw.tabs, errors, seenKeys);
+  }
   return errors;
 }
 
@@ -1528,6 +1752,10 @@ export function collectArtifactParityFindings(packageRoot, pkg) {
 /** Validate an agent extension at packageRoot. Pure: returns string[] errors. */
 export function validateAgent(packageRoot) {
   const errors = [];
+  // Typed project-template sidecar (optional; validated hard when present —
+  // the install pipeline REFUSES a violating package, so the local gate must
+  // catch it pre-publish).
+  errors.push(...validateProjectTemplateSidecar(packageRoot));
   const oasPath = join(packageRoot, "cinatra", "oas.json");
   // OAS optional at this gate: an agent without a generated OAS has no
   // LLM-visible prompt strings to scan. Marketplace-side owns "agent MUST ship OAS".
@@ -1542,6 +1770,279 @@ export function validateAgent(packageRoot) {
   const findings = [];
   walkLlmStrings(parsed, (field, text) => scanOasString(field, text, findings));
   for (const f of findings) errors.push(`cinatra/oas.json [${f.field}] ${f.token}: ${f.reason}`);
+  return errors;
+}
+
+// ===========================================================================
+// agent gate — typed PROJECT-TEMPLATE sidecar (cinatra/project-template.json).
+// Mirror of the AUTHORITATIVE host enforcers in the cinatra monorepo:
+// packages/sdk-extensions/src/project-template-contract.ts
+// (validateProjectTemplate — collect-ALL structural violations — plus the
+// exact-match "one truth source" worker-ref rule
+// checkTemplateWorkerRefsAgainstDependencies), wired into the install
+// pipeline by packages/agents/src/install-from-package.ts. An agent package
+// that ships a template the host would refuse must fail HERE, pre-publish.
+// The bracketed [code] tokens mirror the host violation codes one-to-one so
+// the parity fixtures can pin both sides.
+// ===========================================================================
+export const PROJECT_TEMPLATE_FORMAT_VERSION = "cinatra.ai/project-template@1";
+const PROJECT_TEMPLATE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function isValidTemplateStableId(v) {
+  return typeof v === "string" && PROJECT_TEMPLATE_ID_RE.test(v);
+}
+
+function isValidTemplateVersionConstraint(v) {
+  if (!isObj(v)) return false;
+  if (v.kind === "semver-range") return typeof v.range === "string";
+  if (v.kind === "exact") return typeof v.version === "string";
+  if (v.kind === "git-ref") return typeof v.ref === "string";
+  return false;
+}
+
+function templateVersionConstraintsEqual(a, b) {
+  if (!isObj(a) || !isObj(b) || a.kind !== b.kind) return false;
+  if (a.kind === "semver-range") return a.range === b.range;
+  if (a.kind === "exact") return a.version === b.version;
+  if (a.kind === "git-ref") return a.ref === b.ref;
+  return false;
+}
+
+/** DFS cycle detection over well-formed dependsOn edges (mirrors the host's
+ * findDependencyCycle: only follows edges to known ids, never self). */
+function findTemplateDependencyCycle(tasks, knownIds) {
+  const edges = new Map();
+  for (const t of tasks) {
+    if (!isObj(t) || typeof t.id !== "string") continue;
+    const deps = Array.isArray(t.dependsOn)
+      ? t.dependsOn.filter((d) => typeof d === "string" && knownIds.has(d) && d !== t.id)
+      : [];
+    edges.set(t.id, deps);
+  }
+  const color = new Map(); // 0 white, 1 gray, 2 black
+  const stack = [];
+  const visit = (id) => {
+    color.set(id, 1);
+    stack.push(id);
+    for (const next of edges.get(id) ?? []) {
+      const c = color.get(next) ?? 0;
+      if (c === 1) return [...stack.slice(stack.indexOf(next)), next];
+      if (c === 0) {
+        const found = visit(next);
+        if (found) return found;
+      }
+    }
+    stack.pop();
+    color.set(id, 2);
+    return null;
+  };
+  for (const id of edges.keys()) {
+    if ((color.get(id) ?? 0) === 0) {
+      const found = visit(id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/** Structural template validation — mirror of the host validateProjectTemplate
+ * (collect-ALL, deterministic order). Pure: returns string[] errors. */
+export function validateProjectTemplateObject(input) {
+  const errors = [];
+  const push = (code, path, message) => errors.push(`[${code}] ${path || "(root)"}: ${message}`);
+  if (!isObj(input)) {
+    push("not_object", "", "template must be an object");
+    return errors;
+  }
+  if (input.formatVersion !== PROJECT_TEMPLATE_FORMAT_VERSION) {
+    push("bad_format_version", "formatVersion", `formatVersion must be "${PROJECT_TEMPLATE_FORMAT_VERSION}"`);
+  }
+  if (!isValidTemplateStableId(input.id)) push("bad_template_id", "id", "id must be a stable token");
+  if (typeof input.name !== "string" || input.name.trim() === "") {
+    push("bad_template_name", "name", "name must be a non-empty string");
+  }
+  if (!isObj(input.anchor) || !isValidTemplateStableId(input.anchor.id)) {
+    push("bad_anchor", "anchor.id", "anchor.id must be a stable token");
+  }
+  const tasks = input.tasks;
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    push("no_tasks", "tasks", "tasks must be a non-empty array");
+    return errors;
+  }
+  const taskIds = new Set();
+  const roleToBinding = new Map();
+  tasks.forEach((task, i) => {
+    if (!isObj(task)) {
+      push("bad_task", `tasks[${i}]`, "task must be an object");
+      return;
+    }
+    if (!isValidTemplateStableId(task.id)) {
+      push("bad_task_id", `tasks[${i}].id`, "task id must be a stable token (no path separator)");
+    } else if (taskIds.has(task.id)) {
+      push("duplicate_task_id", `tasks[${i}].id`, `duplicate task id "${task.id}"`);
+    } else {
+      taskIds.add(task.id);
+    }
+    if (typeof task.title !== "string" || task.title.trim() === "") {
+      push("bad_task_title", `tasks[${i}].title`, "task title must be a non-empty string");
+    }
+  });
+  tasks.forEach((task, i) => {
+    if (!isObj(task)) return;
+    const at = `tasks[${i}]`;
+    if (task.dependsOn !== undefined) {
+      if (!Array.isArray(task.dependsOn)) {
+        push("bad_depends_on", `${at}.dependsOn`, "dependsOn must be an array of task ids");
+      } else {
+        const seen = new Set();
+        task.dependsOn.forEach((dep, j) => {
+          if (typeof dep !== "string" || !taskIds.has(dep)) {
+            push("unknown_dependency", `${at}.dependsOn[${j}]`, `dependsOn "${String(dep)}" is not a task id`);
+          } else if (dep === task.id) {
+            push("self_dependency", `${at}.dependsOn[${j}]`, "a task cannot depend on itself");
+          } else if (seen.has(dep)) {
+            push("duplicate_dependency", `${at}.dependsOn[${j}]`, `duplicate dependency "${dep}"`);
+          } else {
+            seen.add(dep);
+          }
+        });
+      }
+    }
+    if (task.schedule !== undefined && task.schedule !== null) {
+      if (!isObj(task.schedule)) {
+        push("bad_schedule", `${at}.schedule`, "schedule must be an object");
+      } else {
+        const s = task.schedule.startOffsetDays;
+        const d = task.schedule.dueOffsetDays;
+        if (s !== undefined && s !== null && !Number.isInteger(s)) {
+          push("bad_offset", `${at}.schedule.startOffsetDays`, "startOffsetDays must be an integer");
+        }
+        if (d !== undefined && d !== null && !Number.isInteger(d)) {
+          push("bad_offset", `${at}.schedule.dueOffsetDays`, "dueOffsetDays must be an integer");
+        }
+        if (
+          typeof s === "number" && Number.isFinite(s) &&
+          typeof d === "number" && Number.isFinite(d) &&
+          d < s
+        ) {
+          push("due_before_start", `${at}.schedule.dueOffsetDays`, "dueOffsetDays must be >= startOffsetDays");
+        }
+      }
+    }
+    if (task.worker !== undefined && task.worker !== null) {
+      const w = task.worker;
+      const wAt = `${at}.worker`;
+      const roleOk = isObj(w) && isValidTemplateStableId(w.role);
+      if (!roleOk) push("bad_worker_role", `${wAt}.role`, "worker.role must be a stable token");
+      if (!isObj(w) || typeof w.packageName !== "string" || w.packageName.trim() === "") {
+        push("bad_worker_package", `${wAt}.packageName`, "worker.packageName must be a non-empty string");
+      }
+      if (!isObj(w) || !isValidTemplateVersionConstraint(w.versionConstraint)) {
+        push("bad_worker_version", `${wAt}.versionConstraint`, "worker.versionConstraint is malformed");
+      }
+      if (roleOk && typeof w.packageName === "string" && isValidTemplateVersionConstraint(w.versionConstraint)) {
+        const prev = roleToBinding.get(w.role);
+        if (!prev) {
+          roleToBinding.set(w.role, { packageName: w.packageName, versionConstraint: w.versionConstraint });
+        } else if (
+          prev.packageName !== w.packageName ||
+          !templateVersionConstraintsEqual(prev.versionConstraint, w.versionConstraint)
+        ) {
+          push("inconsistent_worker_role", `${wAt}.role`, `role "${w.role}" is bound to more than one package/version`);
+        }
+      }
+    }
+    if (task.approval !== undefined && task.approval !== null) {
+      if (!isObj(task.approval) || !isValidTemplateStableId(task.approval.id)) {
+        push("bad_approval", `${at}.approval.id`, "approval.id must be a stable token");
+      }
+    }
+    if (task.acceptance !== undefined) {
+      if (!Array.isArray(task.acceptance)) {
+        push("bad_acceptance", `${at}.acceptance`, "acceptance must be an array");
+      } else {
+        const seen = new Set();
+        task.acceptance.forEach((c, j) => {
+          const cAt = `${at}.acceptance[${j}]`;
+          if (!isObj(c) || !isValidTemplateStableId(c.id)) {
+            push("bad_acceptance_id", `${cAt}.id`, "acceptance.id must be a stable token");
+          } else if (seen.has(c.id)) {
+            push("duplicate_acceptance_id", `${cAt}.id`, `duplicate acceptance id "${c.id}"`);
+          } else {
+            seen.add(c.id);
+          }
+          if (isObj(c) && (typeof c.description !== "string" || c.description.trim() === "")) {
+            push("bad_acceptance_desc", `${cAt}.description`, "acceptance.description must be non-empty");
+          }
+        });
+      }
+    }
+  });
+  const cycle = findTemplateDependencyCycle(tasks, taskIds);
+  if (cycle) push("cyclic_dependencies", "tasks", `dependency cycle: ${cycle.join(" -> ")}`);
+  return errors;
+}
+
+/** The exact-match "one truth source" worker-ref rule — mirror of the host
+ * checkTemplateWorkerRefsAgainstDependencies: every template worker ref MUST
+ * exact-match a manifest cinatra.dependencies edge by BOTH packageName AND
+ * versionConstraint. Pure: returns string[] errors. */
+export function checkTemplateWorkerRefsAgainstManifest(template, dependencies) {
+  const errors = [];
+  const byPackage = new Map();
+  for (const dep of Array.isArray(dependencies) ? dependencies : []) {
+    if (isObj(dep) && typeof dep.packageName === "string") byPackage.set(dep.packageName, dep);
+  }
+  const tasks = Array.isArray(template?.tasks) ? template.tasks : [];
+  tasks.forEach((task, i) => {
+    const w = isObj(task) ? task.worker : null;
+    if (!w || !isObj(w)) return;
+    const at = `tasks[${i}].worker`;
+    const edge = byPackage.get(w.packageName);
+    if (!edge) {
+      errors.push(`[worker_not_in_dependencies] ${at}.packageName: worker "${w.packageName}" is not declared in cinatra.dependencies`);
+      return;
+    }
+    if (!templateVersionConstraintsEqual(w.versionConstraint, edge.versionConstraint)) {
+      errors.push(`[worker_version_mismatch] ${at}.versionConstraint: worker "${w.packageName}" version does not exact-match its cinatra.dependencies edge`);
+    }
+  });
+  return errors;
+}
+
+/** Validate the optional cinatra/project-template.json sidecar of an agent
+ * package. Absent file → no errors (not a project-template package). Present →
+ * structural validation + the exact-match worker-ref rule against the
+ * manifest's cinatra.dependencies. Returns string[] errors, each prefixed with
+ * the sidecar path. */
+export function validateProjectTemplateSidecar(packageRoot) {
+  const templatePath = join(packageRoot, "cinatra", "project-template.json");
+  if (!existsSync(templatePath)) return [];
+  const prefix = "cinatra/project-template.json";
+  let raw;
+  try {
+    raw = readFileSync(templatePath, "utf8");
+  } catch (err) {
+    return [`${prefix} [template_unreadable]: ${err instanceof Error ? err.message : String(err)}`];
+  }
+  let candidate;
+  try {
+    candidate = JSON.parse(raw);
+  } catch (err) {
+    return [`${prefix} [template_unparsable]: not valid JSON: ${err instanceof Error ? err.message : String(err)}`];
+  }
+  const errors = validateProjectTemplateObject(candidate).map((e) => `${prefix} ${e}`);
+  if (errors.length > 0) return errors;
+  let pkg;
+  try {
+    pkg = readPackageJson(packageRoot);
+  } catch {
+    // The common gate already reports an unreadable package.json; the
+    // worker-ref rule simply cannot run without it.
+    return errors;
+  }
+  const deps = Array.isArray(pkg?.cinatra?.dependencies) ? pkg.cinatra.dependencies : [];
+  errors.push(...checkTemplateWorkerRefsAgainstManifest(candidate, deps).map((e) => `${prefix} ${e}`));
   return errors;
 }
 
@@ -1582,7 +2083,7 @@ export function validateConnector(packageRoot) {
 // artifact gate — mirror of packages/extensions/src/artifact-handler.validate.
 // ===========================================================================
 export const ARTIFACT_NAME_RE = /^@cinatra-ai\/[a-z0-9][a-z0-9-]*-artifact$/;
-export const ARTIFACT_ALLOWED_CINATRA_KEYS = new Set(["kind", "apiVersion", "artifact", "dependencies", "roles", "displayName", "vendor"]);
+export const ARTIFACT_ALLOWED_CINATRA_KEYS = new Set(["kind", "apiVersion", "artifact", "dependencies", "roles", "displayName", "vendor", "views", "fieldRenderers", "dashboardContribution"]);
 
 const SKILL_REF_IS_INVALID = (s) => /\.md$/i.test(s) || /^\.{0,2}\//.test(s) || s.startsWith("/");
 const ARTIFACT_FORMS = new Set(["file", "connectorRef", "dashboard"]);
@@ -1617,16 +2118,26 @@ function isContainedRendererEntry(entry) {
   return !entry.slice(2).split("/").some((s) => s === "" || s === "." || s === "..");
 }
 
-const ARTIFACT_UI_ALLOWED_KEYS = ["abiVersion", "sdkAbiRange", "renderers"];
+// `renderers` and `registryItems` are BOTH optional since cinatra#1623 (S5): a
+// `ui` block may carry a renderer slot map, a contributed-registry-item list, or
+// both — but at least one must be non-empty. Mirrors artifactUiSchema in
+// packages/sdk-extensions/src/artifact-contract.ts.
+const ARTIFACT_UI_ALLOWED_KEYS = ["abiVersion", "sdkAbiRange", "renderers", "registryItems"];
 const ARTIFACT_UI_RENDERER_ALLOWED_KEYS = ["entry", "propsApiVersion", "representations"];
+const ARTIFACT_UI_REGISTRY_ITEM_ALLOWED_KEYS = ["name", "entry", "type", "description"];
+// Mirrors ARTIFACT_UI_REGISTRY_ITEM_TYPES + REGISTRY_COMPONENT_NAME_RE in the leaf.
+const ARTIFACT_UI_REGISTRY_ITEM_TYPES = new Set(["registry:ui", "registry:lib"]);
+const REGISTRY_COMPONENT_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 /** VALUE-INDEPENDENT shallow structural pre-screen of a `cinatra.artifact.ui`
  * block. Returns string[] errors ([] = shape-conformant). The caller invokes
  * this only when `ui` is present (it is optional — a purely declarative
- * artifact extension ships none). */
+ * artifact extension ships none). The authoritative derived validation (closed
+ * slot enum / exact abiVersion / GENERATED sdkAbiRange / entry file resolution /
+ * registry-item DAG) is the reusable conformance gate's job. */
 export function validateArtifactUiShape(ui) {
   const errors = [];
-  if (!isObj(ui)) return ["ui must be an object ({ abiVersion, sdkAbiRange, renderers })"];
+  if (!isObj(ui)) return ["ui must be an object ({ abiVersion, sdkAbiRange, renderers?/registryItems? })"];
   for (const k of Object.keys(ui)) {
     if (!ARTIFACT_UI_ALLOWED_KEYS.includes(k)) errors.push(`ui: unexpected key "${k}"`);
   }
@@ -1634,34 +2145,80 @@ export function validateArtifactUiShape(ui) {
     errors.push("ui.abiVersion must be a positive integer");
   }
   if (!nonEmptyStr(ui.sdkAbiRange)) errors.push("ui.sdkAbiRange must be a non-empty string");
-  if (!isObj(ui.renderers) || Object.keys(ui.renderers).length === 0) {
-    errors.push("ui.renderers must be a non-empty object mapping a v1 slot to a renderer");
-    return errors;
-  }
-  for (const [slot, r] of Object.entries(ui.renderers)) {
-    const at = `ui.renderers.${slot}`;
-    if (!isObj(r)) {
-      errors.push(`${at} must be an object ({ entry, propsApiVersion[, representations] })`);
-      continue;
-    }
-    // v1 NO-PORTS: a renderer requests no host ports — only these three keys.
-    for (const k of Object.keys(r)) {
-      if (!ARTIFACT_UI_RENDERER_ALLOWED_KEYS.includes(k)) {
-        errors.push(`${at}: unexpected key "${k}" — v1 renderers request NO host ports (only { entry, propsApiVersion, representations? })`);
+
+  const hasRenderers = ui.renderers !== undefined;
+  const hasRegistryItems = ui.registryItems !== undefined;
+
+  if (hasRenderers) {
+    if (!isObj(ui.renderers) || Object.keys(ui.renderers).length === 0) {
+      errors.push("ui.renderers, when present, must be a non-empty object mapping a v1 slot to a renderer");
+    } else {
+      for (const [slot, r] of Object.entries(ui.renderers)) {
+        const at = `ui.renderers.${slot}`;
+        if (!isObj(r)) {
+          errors.push(`${at} must be an object ({ entry, propsApiVersion[, representations] })`);
+          continue;
+        }
+        // v1 NO-PORTS: a renderer requests no host ports — only these three keys.
+        for (const k of Object.keys(r)) {
+          if (!ARTIFACT_UI_RENDERER_ALLOWED_KEYS.includes(k)) {
+            errors.push(`${at}: unexpected key "${k}" — v1 renderers request NO host ports (only { entry, propsApiVersion, representations? })`);
+          }
+        }
+        if (!isContainedRendererEntry(r.entry)) {
+          errors.push(`${at}.entry must be a package-relative, path-contained subpath ("./…", no "..", no absolute path or URL)`);
+        }
+        if (typeof r.propsApiVersion !== "number" || !Number.isInteger(r.propsApiVersion) || r.propsApiVersion < 1) {
+          errors.push(`${at}.propsApiVersion must be an integer >= 1`);
+        }
+        if (
+          r.representations !== undefined &&
+          (!Array.isArray(r.representations) || r.representations.length === 0 || !r.representations.every(nonEmptyStr))
+        ) {
+          errors.push(`${at}.representations, when present, must be a non-empty array of MIME pattern strings`);
+        }
       }
     }
-    if (!isContainedRendererEntry(r.entry)) {
-      errors.push(`${at}.entry must be a package-relative, path-contained subpath ("./…", no "..", no absolute path or URL)`);
+  }
+
+  if (hasRegistryItems) {
+    if (!Array.isArray(ui.registryItems) || ui.registryItems.length === 0) {
+      errors.push("ui.registryItems, when present, must be a non-empty array of { name, entry, type, description }");
+    } else {
+      const seenNames = new Set();
+      ui.registryItems.forEach((item, i) => {
+        const at = `ui.registryItems[${i}]`;
+        if (!isObj(item)) {
+          errors.push(`${at} must be an object ({ name, entry, type, description })`);
+          return;
+        }
+        for (const k of Object.keys(item)) {
+          if (!ARTIFACT_UI_REGISTRY_ITEM_ALLOWED_KEYS.includes(k)) {
+            errors.push(`${at}: unexpected key "${k}" — a registry item is a presentational-only declaration ({ name, entry, type, description })`);
+          }
+        }
+        if (!nonEmptyStr(item.name) || !REGISTRY_COMPONENT_NAME_RE.test(item.name)) {
+          errors.push(`${at}.name must be a strict lowercase-kebab component token (e.g. "stat-tile")`);
+        } else if (seenNames.has(item.name)) {
+          errors.push(`${at}.name "${item.name}" is a duplicate registry item name within the manifest`);
+        } else {
+          seenNames.add(item.name);
+        }
+        if (!isContainedRendererEntry(item.entry)) {
+          errors.push(`${at}.entry must be a package-relative, path-contained subpath ("./…", no "..", no absolute path or URL)`);
+        }
+        if (!ARTIFACT_UI_REGISTRY_ITEM_TYPES.has(item.type)) {
+          errors.push(`${at}.type must be one of registry:ui | registry:lib`);
+        }
+        if (!nonEmptyStr(item.description)) {
+          errors.push(`${at}.description must be a non-empty string`);
+        }
+      });
     }
-    if (typeof r.propsApiVersion !== "number" || !Number.isInteger(r.propsApiVersion) || r.propsApiVersion < 1) {
-      errors.push(`${at}.propsApiVersion must be an integer >= 1`);
-    }
-    if (
-      r.representations !== undefined &&
-      (!Array.isArray(r.representations) || r.representations.length === 0 || !r.representations.every(nonEmptyStr))
-    ) {
-      errors.push(`${at}.representations, when present, must be a non-empty array of MIME pattern strings`);
-    }
+  }
+
+  if (!hasRenderers && !hasRegistryItems) {
+    errors.push("ui must declare at least one of `renderers` (a non-empty v1 slot map) or `registryItems` (a non-empty list)");
   }
   return errors;
 }
@@ -1733,13 +2290,116 @@ export function validateArtifactDescriptor(a) {
     const v = a.matcherConfidenceThreshold;
     if (typeof v !== "number" || v < 0 || v > 1) errors.push("matcherConfidenceThreshold must be a number in [0,1]");
   }
+  if (a.objectTypes !== undefined) {
+    for (const e of validateArtifactObjectTypeClaims(a.objectTypes)) errors.push(e);
+  }
   if (a.ui !== undefined) {
     for (const e of validateArtifactUiShape(a.ui)) errors.push(e);
   }
   for (const k of Object.keys(a)) {
-    if (!["accepts", "satisfies", "templates", "skills", "agentDependencies", "matcherConfidenceThreshold", "ui"].includes(k)) {
+    if (!["accepts", "satisfies", "templates", "skills", "agentDependencies", "matcherConfidenceThreshold", "ui", "objectTypes"].includes(k)) {
       errors.push(`unexpected key "${k}"`);
     }
+  }
+  return errors;
+}
+
+// `objectTypes` claims — mirror of the host's manifest claim-entry schema
+// (`artifactObjectTypeClaimManifestSchema` + `parseArtifactObjectTypeClaims`
+// in the monorepo's @cinatra-ai/objects claims policy leaf) so the local gate
+// and the install pipeline cannot disagree. A `kind:"artifact"` extension may
+// claim typed object rows: each entry names a namespaced object type id, a
+// claim kind ('dedicated' | 'default'), an optional strict dispositions
+// payload, and an optional inline JSON Schema for the claimed rows.
+export const CLAIMED_OBJECT_TYPE_ID_RE = /^@[\w-]+\/[\w-]+:[\w-]+$/;
+const CLAIM_KINDS = new Set(["dedicated", "default"]);
+const CLAIM_PROJECTIONS = new Set(["raw", "artifact-safe", "none"]);
+const CLAIM_SNAPSHOT_POLICIES = new Set(["content", "metadata", "none"]);
+const CLAIM_SENSITIVITIES = new Set(["normal", "sensitive"]);
+
+function validateClaimDispositions(d, at) {
+  const errors = [];
+  if (!isObj(d)) return [`${at}.dispositions must be an object`];
+  if (!CLAIM_PROJECTIONS.has(d.projection)) {
+    errors.push(`${at}.dispositions.projection must be raw|artifact-safe|none`);
+  }
+  if (d.pinnable !== undefined && typeof d.pinnable !== "boolean") {
+    errors.push(`${at}.dispositions.pinnable must be boolean`);
+  }
+  // Never-projected rows cannot be pinned into context (mirrors the host's
+  // discriminated union: projection "none" forces pinnable false).
+  if (d.projection === "none" && d.pinnable === true) {
+    errors.push(`${at}.dispositions: projection "none" forbids pinnable true`);
+  }
+  if (d.snapshotPolicy !== undefined && !CLAIM_SNAPSHOT_POLICIES.has(d.snapshotPolicy)) {
+    errors.push(`${at}.dispositions.snapshotPolicy must be content|metadata|none`);
+  }
+  if (d.redactionPolicyVersion !== undefined && !nonEmptyStr(d.redactionPolicyVersion)) {
+    errors.push(`${at}.dispositions.redactionPolicyVersion must be a non-empty string when present`);
+  }
+  if (d.sensitivity !== undefined && !CLAIM_SENSITIVITIES.has(d.sensitivity)) {
+    errors.push(`${at}.dispositions.sensitivity must be normal|sensitive`);
+  }
+  for (const k of Object.keys(d)) {
+    if (!["projection", "pinnable", "snapshotPolicy", "redactionPolicyVersion", "sensitivity"].includes(k)) {
+      errors.push(`${at}.dispositions has unexpected key "${k}"`);
+    }
+  }
+  return errors;
+}
+
+export function validateArtifactObjectTypeClaims(claims) {
+  const errors = [];
+  if (!Array.isArray(claims) || claims.length === 0) {
+    return ["objectTypes must be a non-empty array of claim entries when present"];
+  }
+  const seen = new Set();
+  claims.forEach((c, i) => {
+    const at = `objectTypes[${i}]`;
+    if (!isObj(c)) { errors.push(`${at} must be an object`); return; }
+    if (!nonEmptyStr(c.type) || !CLAIMED_OBJECT_TYPE_ID_RE.test(c.type)) {
+      errors.push(`${at}.type must be a namespaced object type id (@scope/package:local-id)`);
+    } else if (seen.has(c.type)) {
+      errors.push(`duplicate objectTypes claim for "${c.type}"`);
+    } else {
+      seen.add(c.type);
+    }
+    if (!CLAIM_KINDS.has(c.claim)) errors.push(`${at}.claim must be dedicated|default`);
+    if (c.dispositions !== undefined) errors.push(...validateClaimDispositions(c.dispositions, at));
+    if (c.schema !== undefined && !isObj(c.schema)) errors.push(`${at}.schema must be a JSON Schema object when present`);
+    for (const k of Object.keys(c)) {
+      if (!["type", "claim", "dispositions", "schema"].includes(k)) errors.push(`${at} has unexpected key "${k}"`);
+    }
+  });
+  return errors;
+}
+
+/** The package that REGISTERS a claimed type: the namespace of its id
+ * (`@scope/pkg:slug` → `@scope/pkg`). Mirrors the host's
+ * `claimedTypeRegisteringPackage`. */
+export function claimedTypeRegisteringPackage(objectTypeId) {
+  const idx = typeof objectTypeId === "string" ? objectTypeId.indexOf(":") : -1;
+  if (idx <= 0) return null;
+  const pkg = objectTypeId.slice(0, idx);
+  return /^@[\w-]+\/[\w-]+$/.test(pkg) ? pkg : null;
+}
+
+/** The third-party schema-source rule (host `validateObjectTypeClaimSchemaSources`,
+ * fail-closed): every claimed type must ship an inline JSON Schema, OR be
+ * self-namespaced, OR name the registering extension in cinatra.dependencies. */
+export function validateObjectTypeClaimSchemaSources(packageName, claims, dependencyPackageNames) {
+  const errors = [];
+  const deps = new Set(dependencyPackageNames);
+  for (const claim of Array.isArray(claims) ? claims : []) {
+    if (!isObj(claim) || claim.schema !== undefined) continue;
+    const registrant = claimedTypeRegisteringPackage(claim.type);
+    if (registrant == null) continue; // shape error already reported above
+    if (registrant === packageName) continue; // self-registered type
+    if (deps.has(registrant)) continue; // registering extension is a declared dependency
+    errors.push(
+      `objectTypes claim "${claim.type}" has no schema source: ship a JSON Schema in the claim ` +
+        `or declare a cinatra.dependencies entry on the type-registering extension "${registrant}"`,
+    );
   }
   return errors;
 }
@@ -1762,10 +2422,22 @@ export function validateArtifactPackageShape(pkg) {
     errors.push("package.json must declare a cinatra.artifact descriptor (accepts[, satisfies][, templates][, skills][, agentDependencies])");
   } else {
     for (const e of validateArtifactDescriptor(cinatra.artifact)) errors.push(`cinatra.artifact descriptor is invalid: ${e}`);
+    // Schema-source rule for objectTypes claims (mirrors the host's install
+    // pipeline check — cinatra.dependencies entries are { packageName } objects).
+    if (isObj(cinatra.artifact) && cinatra.artifact.objectTypes !== undefined) {
+      const declaredDeps = Array.isArray(cinatra.dependencies)
+        ? cinatra.dependencies
+            .map((d) => (isObj(d) && typeof d.packageName === "string" ? d.packageName : null))
+            .filter((n) => n != null)
+        : [];
+      for (const e of validateObjectTypeClaimSchemaSources(pkg.name, cinatra.artifact.objectTypes, declaredDeps)) {
+        errors.push(e);
+      }
+    }
   }
   for (const k of Object.keys(cinatra)) {
     if (!ARTIFACT_ALLOWED_CINATRA_KEYS.has(k)) {
-      errors.push(`artifact extensions may only declare cinatra.{kind,apiVersion,artifact,dependencies,roles,displayName,vendor}; unexpected key "${k}"`);
+      errors.push(`artifact extensions may only declare cinatra.{kind,apiVersion,artifact,dependencies,roles,displayName,vendor,views,fieldRenderers,dashboardContribution}; unexpected key "${k}"`);
     }
   }
   return errors;
@@ -1783,13 +2455,18 @@ export function validateArtifact(packageRoot) {
 
 // ===========================================================================
 // skill gate — mirror of the kind-at-end naming-conformance rule for skills:
-// the dir suffix for kind:"skill" is `-skills`, the package follows
-// @<scope>/<slug>-skills (first-party-plus-vendored scope policy). A vendored
-// skill bundle (e.g. @anthropics/skills) may use a no-suffix VendoredPackageName,
-// allowlisted host-side; standalone we accept either the `-skills` suffix OR a
-// declared cinatra.vendoredFrom.
+// the package follows @<scope>/<slug>-skill (first-party-plus-vendored scope
+// policy). The suffix is SINGULAR: one kind:"skill" extension ships exactly one
+// skills-schema bundle (cinatra#2089, epic #2086 S2), so the plural
+// `-skills` name is retired. It stays ACCEPTED here while the S3 migration
+// (cinatra#2090) renames the four packages that still carry it — the host-side
+// packaging verdict is the authority that refuses a plural name, and it waives
+// exactly those four by name in its expiring ledger. A vendored skill bundle
+// (e.g. an upstream skills collection) may use a no-suffix VendoredPackageName, allowlisted
+// host-side; standalone we accept either suffix OR a declared
+// cinatra.vendoredFrom.
 // ===========================================================================
-export const SKILL_NAME_RE = /^@[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*-skills$/;
+export const SKILL_NAME_RE = /^@[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*-skills?$/;
 
 export function validateSkillPackageShape(pkg) {
   const errors = [];
@@ -1801,7 +2478,7 @@ export function validateSkillPackageShape(pkg) {
   if (typeof pkg?.name !== "string") {
     errors.push("package.json is missing `name`");
   } else if (!SKILL_NAME_RE.test(pkg.name) && !vendored) {
-    errors.push(`package name "${pkg.name}" does not match the kind-at-end convention @<scope>/<slug>-skills (a vendored bundle may use its upstream name with cinatra.vendoredFrom)`);
+    errors.push(`package name "${pkg.name}" does not match the kind-at-end convention @<scope>/<slug>-skill (a vendored bundle may use its upstream name with cinatra.vendoredFrom)`);
   }
   return errors;
 }
