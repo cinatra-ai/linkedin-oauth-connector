@@ -37,6 +37,7 @@ export function LinkedInOAuthSettingsPanel({
   action,
 }: LinkedInOAuthSettingsPanelProps) {
   const [copied, setCopied] = useState(false);
+  const organizationPosting = settings.organizationPosting === true;
 
   async function handleCopyRedirectUri() {
     if (!redirectUri) {
@@ -96,11 +97,18 @@ export function LinkedInOAuthSettingsPanel({
             />
           </Label>
           <div className="flex items-start gap-3 sm:col-span-2">
+            {/* The checkbox keeps its own checked state. After a successful
+                save React resets the form, which puts the box back to the value
+                it had when it mounted, and router.refresh() keeps client state,
+                so a changed defaultChecked alone is never read. The key changes
+                with the stored value, so each stored value mounts a new box
+                whose initial value is the stored one. */}
             <Checkbox
+              key={organizationPosting ? "organization-posting-on" : "organization-posting-off"}
               id="linkedin-organization-posting"
               name="organizationPosting"
               value="true"
-              defaultChecked={settings.organizationPosting === true}
+              defaultChecked={organizationPosting}
               aria-describedby="linkedin-organization-posting-help"
               className="mt-0.5"
             />
