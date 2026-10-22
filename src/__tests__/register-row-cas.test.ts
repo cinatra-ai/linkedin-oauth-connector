@@ -439,3 +439,85 @@ describe("NOTE 7: a shadow provider listed before the host provider is never use
     });
   }
 });
+
+describe("rule 1: a thrown value counts only by its own string code", () => {
+  const CONFLICT = "CONNECTOR_CONFIG_CONFLICT";
+  // [label, the value the host's update throws, the code the action refuses with].
+  // Every value but the first would read as the conflict if the code were read loosely.
+  const THROWN: Array<[string, () => unknown, string]> = [
+    ["an error with an own string code (the control)", () => Object.assign(new Error("x"), { code: CONFLICT }), "LINKEDIN_CONFIG_CONFLICT"],
+    ["a string", () => CONFLICT, "LINKEDIN_CONFIG_SAVE_FAILED"],
+    ["null", () => null, "LINKEDIN_CONFIG_SAVE_FAILED"],
+    ["an object whose code is inherited", () => Object.create({ code: CONFLICT }) as unknown, "LINKEDIN_CONFIG_SAVE_FAILED"],
+    ["an error whose own code is not a string", () => Object.assign(new Error("x"), { code: [CONFLICT] }), "LINKEDIN_CONFIG_SAVE_FAILED"],
+    [
+      "an error whose own code getter throws",
+      () =>
+        Object.defineProperty(new Error("x"), "code", {
+          get() {
+            throw new Error(SENTINEL);
+          },
+        }),
+      "LINKEDIN_CONFIG_SAVE_FAILED",
+    ],
+  ];
+
+  for (const [label, thrown, code] of THROWN) {
+    it(`(T18 code) [CONTRACT] saveConnection: an update that throws ${label} refuses with ${code} and writes nothing`, async () => {
+      const spies = consoleSpies();
+      const fake = makeFakeHostConfig();
+      fake.setRaw(KEY, JSON.stringify(STORED));
+      const update = vi.fn(() => {
+        throw thrown();
+      });
+      const { call } = makeHostCtx(register, { store: fake.withOverrides({ update }) });
+      const out = await outcomeOf(call("saveConnection", INPUT));
+      expect(errorOf(out).code, "CONTRACT: outcome").toBe(code);
+      expectNoSentinel(errorOf(out), fake.state.logs, spies);
+      expect(fake.rowOf(KEY)).toEqual(STORED);
+      expect(fake.write).not.toHaveBeenCalled();
+      expect(update).toHaveBeenCalledTimes(1);
+    });
+  }
+});
+
+describe("saveConnection: an input that is not an object of fields changes no field", () => {
+  const INPUTS: Array<[string, unknown]> = [
+    ["a string", "clientId=b&clientSecret=z"],
+    ["a number", 42],
+    ["null", null],
+    ["undefined", undefined],
+    ["an array of strings", ["b", "z"]],
+    ["an array of field objects", [{ clientId: "b", clientSecret: "z", organizationPosting: "false" }]],
+  ];
+
+  for (const [label, input] of INPUTS) {
+    it(`(T19 input) [REGRESSION] saveConnection with ${label} as its input stores the row unchanged`, async () => {
+      const { fake, call } = setup({ row: STORED });
+      await expect(call("saveConnection", input)).resolves.toEqual({ banner: "saved" });
+      expect(fake.rowOf(KEY), "REGRESSION: row content").toEqual(STORED);
+      expect(fake.state.landed).toBe(1);
+    });
+  }
+});
+
+describe("the reads: a store whose read throws", () => {
+  for (const action of ["currentConfig", "connectionStatus"] as const) {
+    it(`(T20 read) [REGRESSION] ${action}: a read that throws refuses with the store's error and changes nothing`, async () => {
+      const fake = makeFakeHostConfig();
+      fake.setRaw(KEY, JSON.stringify(STORED));
+      const failure = new Error("the store read failed");
+      const read = vi.fn(() => {
+        throw failure;
+      });
+      const { call } = makeHostCtx(register, { store: fake.withOverrides({ read }) });
+      const out = await outcomeOf(call(action));
+      expect(out.done, "REGRESSION: the action must reject").toBe(false);
+      expect(errorOf(out)).toBe(failure);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(fake.rowOf(KEY)).toEqual(STORED);
+      expect(fake.write).not.toHaveBeenCalled();
+      expect(fake.update).not.toHaveBeenCalled();
+    });
+  }
+});
