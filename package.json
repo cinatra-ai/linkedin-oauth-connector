@@ -13,7 +13,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./setup-page": "./src/setup-page.tsx",
-    "./actions": "./src/actions.ts"
+    "./actions": "./src/actions.ts",
+    "./register": "./src/register.ts"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",
@@ -54,8 +55,13 @@
     "displayName": "LinkedIn OAuth",
     "logo": "./cinatra/logo.svg",
     "sdkAbiRange": "^2",
-    "requestedHostPorts": ["nango"],
-    "dependencies": []
+    "requestedHostPorts": [
+      "nango",
+      "capabilities",
+      "ui"
+    ],
+    "dependencies": [],
+    "serverEntry": "./register"
   },
   "scripts": {
     "test": "vitest",
