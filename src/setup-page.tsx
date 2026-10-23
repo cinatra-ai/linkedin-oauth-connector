@@ -2,14 +2,15 @@
 //
 // The admin credentials half of the LinkedIn connector split
 // (cinatra-ai/linkedin-connector#9). Owns the Client ID / secret form
-// IN-PACKAGE. Persistence + reads go through the SDK's GENERIC connector-config
-// accessor keyed by "linkedin" — the SAME row the host's `@/lib/linkedin-api`
-// reads — so no host runtime package or DI slot is needed (unlike
-// google-oauth-connector, whose credentials also power better-auth sign-in).
+// IN-PACKAGE. Reads go through the SDK's GENERIC connector-config accessor
+// keyed by "linkedin" — the SAME row the host's `@/lib/linkedin-api` reads.
+// The form's save action refuses and writes nothing (src/actions.ts): the row
+// changes only through the host's atomic `update`, which the registered
+// `saveConnection` / `clearConnection` actions use (src/register.ts).
 //
 // The OAuth client SECRET is write-only: never sent to the client. The form
-// renders the secret field empty + a "saved" indicator; saving a blank secret
-// KEEPS the stored value (saveLinkedInOAuthConnectionAction merges).
+// renders the secret field empty + a "saved" indicator; the registered
+// `saveConnection` keeps the stored secret when a blank one is submitted.
 //
 // Tabbed layout (cinatra-ai/linkedin-oauth-connector#34, connector-setup-tabs
 // rollout — cinatra-ai/cinatra#1105, epic cinatra-ai/cinatra#1101): this is a

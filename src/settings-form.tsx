@@ -38,8 +38,8 @@ export function LinkedInOAuthSettingsForm({
         kind: "success",
       });
       // Re-render the setup page's server component so it re-reads the
-      // just-saved credentials. The save action persists via the merge-preserve
-      // setExtensionConnectorConfig but cannot revalidate a path itself: this
+      // just-saved credentials (the save action refuses today: src/actions.ts).
+      // A server action cannot revalidate a path itself: this
       // connector is mounted by the host at a dynamic dispatch route it does not
       // know (and must not couple to). router.refresh() re-fetches the current
       // route's RSC payload, so the panel renders the stored Client ID and the

@@ -8,81 +8,29 @@
 // Gated by the SDK's `requireExtensionAction(pkg, "manage")` as the FIRST
 // executable statement (org_owner/org_admin/platform_admin, fail-closed).
 //
-// Persistence uses the SDK's GENERIC host-binds-once connector-config accessor
-// (getExtensionConnectorConfig / setExtensionConnectorConfig). The host store
-// (register-extension-connector-config-store.ts) keys ONLY by `key` and IGNORES
-// the packageId, so writing key "linkedin" lands in the SAME row the host's
-// `@/lib/linkedin-api` reads via readConnectorConfigFromDatabase("linkedin").
-// This FIXES the orphaned-credentials bug: the old per-user package wrote the
-// dead key "linkedin_connection", which nobody read.
+// It then REFUSES every save and writes nothing. The shared row "linkedin" also
+// holds what the LinkedIn connector writes (accounts, logging flag, redirect
+// URI); a whole-row write loses a change stored in between, so the row changes
+// only through the host's atomic `update` (the `./register` actions). A server
+// action cannot reach it: it has no render-time `ctx`, and the SDK accessor
+// has only get/set/delete (src/__tests__/actions.test.ts).
 
-import { z } from "zod";
-import {
-  requireExtensionAction,
-  getExtensionConnectorConfig,
-  setExtensionConnectorConfig,
-} from "@cinatra-ai/sdk-extensions";
+import { requireExtensionAction } from "@cinatra-ai/sdk-extensions";
 
 const PACKAGE_NAME = "@cinatra-ai/linkedin-oauth-connector";
-// The shared connector-config key the host's `@/lib/linkedin-api` reads/writes.
-const LINKEDIN_CONFIG_KEY = "linkedin";
 
-const linkedinOAuthSchema = z.object({
-  clientId: z.string().optional(),
-  clientSecret: z.string().optional(),
-  // A checkbox: a ticked box submits "true", an unticked box submits nothing.
-  organizationPosting: z.string().optional(),
-});
+/** The refusal of the bundled form's save. Fixed text; it carries no input. */
+class LinkedInBundledSaveRefusedError extends Error {
+  readonly code = "LINKEDIN_CONFIG_BUNDLED_SAVE_REFUSED";
+  constructor() {
+    super(
+      "This setup page cannot save the LinkedIn settings safely, so nothing was changed. The settings are saved through the connector's registered save action.",
+    );
+    this.name = "LinkedInBundledSaveRefusedError";
+  }
+}
 
-// The full shape the host's linkedin-api persists under key "linkedin". Only
-// the credential fields are owned by this admin form; accounts / loggingEnabled
-// / redirectUri are owned by the connect + materialization paths and MUST be
-// preserved on every save (a naive overwrite would wipe connected accounts).
-type LinkedInConnectorConfig = {
-  clientId?: string;
-  clientSecret?: string;
-  // True only for a LinkedIn app whose one product is the Community Management
-  // API: Connect then asks for company page scopes instead of sign-in scopes.
-  organizationPosting?: boolean;
-  redirectUri?: string;
-  loggingEnabled?: boolean;
-  accounts?: unknown[];
-};
-
-export async function saveLinkedInOAuthConnectionAction(formData: FormData) {
+export async function saveLinkedInOAuthConnectionAction(_formData: FormData): Promise<void> {
   await requireExtensionAction(PACKAGE_NAME, "manage");
-  const parsed = linkedinOAuthSchema.parse({
-    clientId: formData.get("clientId") ?? undefined,
-    clientSecret: formData.get("clientSecret") ?? undefined,
-    organizationPosting: formData.get("organizationPosting") ?? undefined,
-  });
-
-  const current = getExtensionConnectorConfig<LinkedInConnectorConfig>(
-    PACKAGE_NAME,
-    LINKEDIN_CONFIG_KEY,
-    {},
-  );
-
-  const trimmedClientId = parsed.clientId?.trim();
-  const trimmedClientSecret = parsed.clientSecret?.trim();
-
-  // Merge-preserve: blank inputs KEEP the stored value (the "leave blank to
-  // keep the saved value" contract — the clientId is pre-filled in the form, so
-  // a blank submit means "unchanged", never "clear"). The secret is write-only
-  // and never round-trips to the browser, so a blank secret always means keep.
-  const next: LinkedInConnectorConfig = {
-    ...current,
-    clientId: trimmedClientId || current.clientId,
-    clientSecret: trimmedClientSecret || current.clientSecret,
-    // Not merge-preserved: the box is part of every submit, so an absent value
-    // means the admin left it unticked.
-    organizationPosting: parsed.organizationPosting === "true",
-  };
-
-  setExtensionConnectorConfig(PACKAGE_NAME, LINKEDIN_CONFIG_KEY, next);
-  // No redirect: the setup page is already the current route. Returning
-  // normally lets the client form show a success notification and refresh the
-  // server component (mirrors google-oauth-connector's save action, which also
-  // does not redirect). A redirect() here would throw NEXT_REDIRECT, which the
-  // client form's try/catch would mis-handle as a save failure.
+  throw new LinkedInBundledSaveRefusedError();
 }

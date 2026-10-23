@@ -1,46 +1,32 @@
 /**
- * saveLinkedInOAuthConnectionAction merge-preserve contract
- * (cinatra-ai/linkedin-connector#9 — the admin credentials half of the split).
+ * saveLinkedInOAuthConnectionAction refuses and writes nothing.
  *
- * The admin form writes the LinkedIn app credentials under the connector-config
- * key "linkedin" — the SAME row the host's `@/lib/linkedin-api` reads. The save
- * MUST:
- *   1. write key "linkedin" (the old per-user package wrote the dead key
- *      "linkedin_connection", which nobody read — the orphaned-credentials bug);
- *   2. PRESERVE connected accounts / loggingEnabled / redirectUri on every save
- *      (a naive overwrite would wipe accounts materialized by the connect path);
- *   3. keep the stored client secret when the form submits a blank secret
- *      (write-only field, "leave blank to keep");
- *   4. keep the stored client id when the form submits a blank id.
+ * The shared connector-config row "linkedin" also holds the connected accounts,
+ * the logging flag and the redirect URI that the LinkedIn connector writes. A
+ * read followed by a whole-row write loses a change stored in between, so the
+ * row changes only through the host's atomic `update` (src/register.ts). This
+ * server action cannot reach that road, so it MUST:
+ *   1. check `manage` first (fail closed: a denial propagates, nothing else runs);
+ *   2. refuse every save with LINKEDIN_CONFIG_BUNDLED_SAVE_REFUSED;
+ *   3. never read, write or delete the connector config;
+ *   4. carry no submitted value in its error.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const h = vi.hoisted(() => {
-  const store = new Map<string, unknown>();
-  return {
-    store,
-    requireExtensionAction: vi.fn(async () => undefined),
-    getExtensionConnectorConfig: vi.fn(
-      <T,>(_pkg: string, key: string, fallback: T): T =>
-        store.has(key) ? (store.get(key) as T) : fallback,
-    ),
-    setExtensionConnectorConfig: vi.fn((_pkg: string, key: string, value: unknown) => {
-      store.set(key, value);
-    }),
-  };
-});
+const SENTINEL = "sentinel-5c1d-form-value";
 
-const {
-  store,
-  requireExtensionAction,
-  getExtensionConnectorConfig,
-  setExtensionConnectorConfig,
-} = h;
+const h = vi.hoisted(() => ({
+  requireExtensionAction: vi.fn(async () => undefined),
+  getExtensionConnectorConfig: vi.fn(),
+  setExtensionConnectorConfig: vi.fn(),
+  deleteExtensionConnectorConfig: vi.fn(),
+}));
 
 vi.mock("@cinatra-ai/sdk-extensions", () => ({
   requireExtensionAction: h.requireExtensionAction,
   getExtensionConnectorConfig: h.getExtensionConnectorConfig,
   setExtensionConnectorConfig: h.setExtensionConnectorConfig,
+  deleteExtensionConnectorConfig: h.deleteExtensionConnectorConfig,
 }));
 
 import { saveLinkedInOAuthConnectionAction } from "../actions";
@@ -51,97 +37,54 @@ function form(entries: Record<string, string>): FormData {
   return fd;
 }
 
-async function run(fd: FormData) {
-  // The action returns normally (no redirect) — the client form notifies on
-  // success; a redirect() would throw NEXT_REDIRECT the form would mis-handle.
-  await expect(saveLinkedInOAuthConnectionAction(fd)).resolves.toBeUndefined();
+async function refusal(fd: FormData): Promise<unknown> {
+  try {
+    await saveLinkedInOAuthConnectionAction(fd);
+  } catch (e) {
+    return e;
+  }
+  throw new Error("the save did not refuse");
+}
+
+function expectNoConfigAccess() {
+  expect(h.getExtensionConnectorConfig).not.toHaveBeenCalled();
+  expect(h.setExtensionConnectorConfig).not.toHaveBeenCalled();
+  expect(h.deleteExtensionConnectorConfig).not.toHaveBeenCalled();
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  store.clear();
 });
 
+const SUBMITS: Array<[string, Record<string, string>]> = [
+  ["new credentials", { clientId: SENTINEL, clientSecret: SENTINEL }],
+  ["new credentials with the Community Management box ticked", { clientId: SENTINEL, clientSecret: SENTINEL, organizationPosting: "true" }],
+  ["blank fields (keep the stored values)", { clientId: "", clientSecret: "" }],
+  ["a blank secret only", { clientId: SENTINEL, clientSecret: "" }],
+];
+
 describe("saveLinkedInOAuthConnectionAction", () => {
-  it("writes the credentials under the shared 'linkedin' key (not the dead 'linkedin_connection')", async () => {
-    await run(form({ clientId: "id-1", clientSecret: "sec-1" }));
-    expect(requireExtensionAction).toHaveBeenCalledWith(
-      "@cinatra-ai/linkedin-oauth-connector",
-      "manage",
-    );
-    expect(setExtensionConnectorConfig).toHaveBeenCalledTimes(1);
-    const [, key, value] = setExtensionConnectorConfig.mock.calls[0]!;
-    expect(key).toBe("linkedin");
-    expect(value).toMatchObject({ clientId: "id-1", clientSecret: "sec-1" });
-  });
-
-  it("preserves accounts / loggingEnabled / redirectUri across a credential save", async () => {
-    store.set("linkedin", {
-      clientId: "old-id",
-      clientSecret: "old-sec",
-      redirectUri: "https://nango.example/callback",
-      loggingEnabled: false,
-      accounts: [{ id: "acc-1", name: "Ada" }],
+  for (const [label, entries] of SUBMITS) {
+    it(`refuses a submit of ${label}: manage is checked first, nothing is read or written`, async () => {
+      const e = await refusal(form(entries));
+      expect(h.requireExtensionAction).toHaveBeenCalledTimes(1);
+      expect(h.requireExtensionAction).toHaveBeenCalledWith("@cinatra-ai/linkedin-oauth-connector", "manage");
+      expect(e).toBeInstanceOf(Error);
+      expect((e as { code?: unknown }).code).toBe("LINKEDIN_CONFIG_BUNDLED_SAVE_REFUSED");
+      expect((e as Error).message).toBe(
+        "This setup page cannot save the LinkedIn settings safely, so nothing was changed. The settings are saved through the connector's registered save action.",
+      );
+      expect(String(e)).not.toContain(SENTINEL);
+      expect(JSON.stringify(e)).not.toContain(SENTINEL);
+      expect((e as { cause?: unknown }).cause).toBeUndefined();
+      expectNoConfigAccess();
     });
-    await run(form({ clientId: "new-id", clientSecret: "new-sec" }));
-    const [, , value] = setExtensionConnectorConfig.mock.calls[0]! as [string, string, Record<string, unknown>];
-    expect(value).toMatchObject({
-      clientId: "new-id",
-      clientSecret: "new-sec",
-      redirectUri: "https://nango.example/callback",
-      loggingEnabled: false,
-      accounts: [{ id: "acc-1", name: "Ada" }],
-    });
-  });
+  }
 
-  it("keeps the stored secret when a blank secret is submitted", async () => {
-    store.set("linkedin", { clientId: "id-1", clientSecret: "keep-me" });
-    await run(form({ clientId: "id-2", clientSecret: "" }));
-    const [, , value] = setExtensionConnectorConfig.mock.calls[0]! as [string, string, Record<string, unknown>];
-    expect(value.clientSecret).toBe("keep-me");
-    expect(value.clientId).toBe("id-2");
-  });
-
-  it("keeps the stored client id when a blank id is submitted", async () => {
-    store.set("linkedin", { clientId: "keep-id", clientSecret: "sec-1" });
-    await run(form({ clientId: "", clientSecret: "new-sec" }));
-    const [, , value] = setExtensionConnectorConfig.mock.calls[0]! as [string, string, Record<string, unknown>];
-    expect(value.clientId).toBe("keep-id");
-    expect(value.clientSecret).toBe("new-sec");
-  });
-
-  it("stores organizationPosting true when the Community Management box is ticked", async () => {
-    await run(form({ clientId: "cm-id", clientSecret: "cm-sec", organizationPosting: "true" }));
-    const [, , value] = setExtensionConnectorConfig.mock.calls[0]! as [string, string, Record<string, unknown>];
-    expect(value.organizationPosting).toBe(true);
-  });
-
-  it("stores organizationPosting false when the box is unticked, even when it was on", async () => {
-    store.set("linkedin", { clientId: "cm-id", clientSecret: "cm-sec", organizationPosting: true });
-    await run(form({ clientId: "", clientSecret: "" }));
-    const [, , value] = setExtensionConnectorConfig.mock.calls[0]! as [string, string, Record<string, unknown>];
-    expect(value.organizationPosting).toBe(false);
-    expect(value.clientId).toBe("cm-id");
-    expect(value.clientSecret).toBe("cm-sec");
-  });
-
-  it("keeps accounts / loggingEnabled / redirectUri when the organizationPosting box is saved", async () => {
-    store.set("linkedin", {
-      clientId: "old-id",
-      clientSecret: "old-sec",
-      redirectUri: "https://nango.example/callback",
-      loggingEnabled: true,
-      accounts: [{ id: "acc-1", name: "Ada" }],
-    });
-    await run(form({ clientId: "cm-id", clientSecret: "cm-sec", organizationPosting: "true" }));
-    const [, , value] = setExtensionConnectorConfig.mock.calls[0]! as [string, string, Record<string, unknown>];
-    expect(value).toMatchObject({
-      clientId: "cm-id",
-      clientSecret: "cm-sec",
-      organizationPosting: true,
-      redirectUri: "https://nango.example/callback",
-      loggingEnabled: true,
-      accounts: [{ id: "acc-1", name: "Ada" }],
-    });
+  it("propagates a manage denial and does nothing else", async () => {
+    const denial = new Error("denied");
+    h.requireExtensionAction.mockRejectedValueOnce(denial);
+    expect(await refusal(form({ clientId: SENTINEL, clientSecret: SENTINEL }))).toBe(denial);
+    expectNoConfigAccess();
   });
 });

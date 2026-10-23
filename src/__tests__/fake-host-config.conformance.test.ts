@@ -46,9 +46,11 @@ const merge = (extra: Record<string, unknown>) => (current: unknown) => ({
 });
 
 describe("fake host connector-config update: scenario table S1-S14", () => {
-  it("(S1) row present: the updater gets the parsed row; 1 swap; the cache holds the stored value", () => {
+  it("(S1) row present: the updater gets the parsed row; 1 swap; the cache entry is evicted, so the next read reads the row", () => {
     const fake = makeFakeHostConfig({ cacheTtlMs: 10_000 });
     fake.setRaw(ID, JSON.stringify(ROW));
+    expect(fake.read(ID, null)).toEqual(ROW);
+    expect(fake.cacheValue(ID)).toEqual(ROW);
     const seen: unknown[] = [];
     fake.update(ID, (c) => {
       seen.push(c);
@@ -57,7 +59,19 @@ describe("fake host connector-config update: scenario table S1-S14", () => {
     expect(seen).toEqual([ROW]);
     expect(fake.state.portCalls).toEqual({ readRaw: 1, compareAndSwap: 1, insertIfAbsent: 0 });
     expect(fake.rowOf(ID)).toEqual({ ...ROW, clientId: "b" });
-    expect(fake.cacheValue(ID)).toEqual({ ...ROW, clientId: "b" });
+    expect(fake.cacheValue(ID)).toBeUndefined();
+    // Another writer changes the row after the swap landed: the next read
+    // inside the TTL reads that row, not the text this update stored.
+    fake.otherProcessWrites(ID, { ...ROW, clientId: "c" });
+    expect(fake.read(ID, null)).toEqual({ ...ROW, clientId: "c" });
+  });
+
+  it("(S2b) row absent with a cache: the insert lands and evicts the cache entry", () => {
+    const fake = makeFakeHostConfig({ cacheTtlMs: 10_000 });
+    expect(fake.read(ID, null)).toBeNull();
+    fake.update(ID, () => ({ clientId: "b" }));
+    expect(fake.rowOf(ID)).toEqual({ clientId: "b" });
+    expect(fake.cacheValue(ID)).toBeUndefined();
   });
 
   it("(S2) row absent: the updater gets null; the insert lands; exactly 1 readRaw", () => {
@@ -279,6 +293,128 @@ describe("fake host connector-config update: scenario table S1-S14", () => {
     expect(fake.state.portCalls.compareAndSwap).toBe(2);
     expect(fake.rowOf(ID)).toEqual({ ...ROW, clientId: "b" });
   });
+});
+
+// The host module's table "the storable value is an allow-list of JSON kinds"
+// (C1), with the same cases: the fake refuses what the host refuses and stores
+// what the host stores.
+describe("fake host connector-config update: the storable value is an allow-list of JSON kinds (C1)", () => {
+  class Settings {
+    note = SENTINEL;
+  }
+  const nestedCycle = () => {
+    const row: Record<string, unknown> = { note: SENTINEL, inner: {} };
+    (row.inner as Record<string, unknown>).back = row;
+    return row;
+  };
+  class Rows extends Array<unknown> {}
+  const deepChain = () => {
+    let row: unknown = SENTINEL;
+    for (let i = 0; i < 100_000; i += 1) row = { row };
+    return row;
+  };
+  const REFUSED_VALUES: Array<[string, () => unknown]> = [
+    ["NaN", () => ({ note: SENTINEL, n: NaN })],
+    ["Infinity", () => ({ note: SENTINEL, n: Infinity })],
+    ["-Infinity", () => [SENTINEL, -Infinity]],
+    ["a top-level NaN", () => NaN],
+    ["a Map", () => ({ m: new Map([["k", SENTINEL]]) })],
+    ["a Set", () => new Set([SENTINEL])],
+    ["a Date", () => ({ note: SENTINEL, at: new Date(0) })],
+    ["a nested function", () => ({ note: SENTINEL, f: () => SENTINEL })],
+    ["a nested symbol", () => ({ note: SENTINEL, s: Symbol(SENTINEL) })],
+    ["a symbol key", () => ({ [Symbol("k")]: SENTINEL, note: SENTINEL })],
+    ["a nested bigint", () => ({ note: SENTINEL, n: BigInt(7) })],
+    ["a class instance", () => new Settings()],
+    ["a boxed number", () => ({ note: SENTINEL, n: Object(1) as unknown })],
+    ["an accessor property", () => ({ get note() { return SENTINEL; } })],
+    ["an array hole", () => {
+      const holey: unknown[] = new Array(3);
+      holey[0] = SENTINEL;
+      holey[2] = SENTINEL;
+      return holey;
+    }],
+    ["undefined in an array", () => [SENTINEL, undefined]],
+    ["a nested cycle", nestedCycle],
+    ["an Array subclass instance", () => Rows.from([SENTINEL])],
+    ["an array with an extra key", () => Object.assign([SENTINEL], { x: SENTINEL })],
+    ["an array with a trailing hole", () => {
+      const trailing: unknown[] = [SENTINEL];
+      trailing.length = 2;
+      return trailing;
+    }],
+    ["an array with a hole and an extra key", () => {
+      const holey: unknown[] = new Array(3);
+      holey[0] = SENTINEL;
+      holey[2] = SENTINEL;
+      return Object.assign(holey, { x: SENTINEL });
+    }],
+    ["a non-enumerable property", () => Object.defineProperty({ a: 1 }, "hidden", { value: SENTINEL, enumerable: false })],
+    ["a proxy whose ownKeys trap throws", () => new Proxy({ note: SENTINEL }, {
+      ownKeys() {
+        throw new Error(SENTINEL);
+      },
+    })],
+    ["a 100000-deep chain", deepChain],
+    ["a thenable whose then throws", () => ({
+      note: SENTINEL,
+      then() {
+        throw 0;
+      },
+    })],
+    ["a proxy whose getPrototypeOf trap throws", () => new Proxy({ note: SENTINEL }, {
+      getPrototypeOf() {
+        throw new Error(SENTINEL);
+      },
+    })],
+    ["a proxy whose own key has no descriptor", () => new Proxy({}, {
+      ownKeys: () => ["note"],
+      getOwnPropertyDescriptor: () => undefined,
+      get: () => SENTINEL,
+    })],
+    ["a proxy whose then read throws", () => new Proxy({ note: SENTINEL }, {
+      get(target, name) {
+        if (name === "then") throw new Error(SENTINEL);
+        return Reflect.get(target, name);
+      },
+    })],
+  ];
+  for (const [label, make] of REFUSED_VALUES) {
+    it(`(C1) the updater returns a value with ${label}: UPDATE_INVALID before any swap or insert; no sentinel`, () => {
+      const spies = consoleSpies();
+      const fake = makeFakeHostConfig({ cacheTtlMs: 10_000 });
+      fake.setRaw(ID, JSON.stringify(ROW));
+      fake.read(ID, null);
+      const e = caught(() => fake.update(ID, make));
+      expectRefusal(e, "CONNECTOR_CONFIG_UPDATE_INVALID");
+      expect(fake.state.portCalls).toEqual({ readRaw: 1, compareAndSwap: 0, insertIfAbsent: 0 });
+      expect(fake.state.persists).toBe(0);
+      expect(fake.rawOf(ID)).toBe(JSON.stringify(ROW));
+      expect(fake.cacheValue(ID)).toBeUndefined();
+      expectNoSentinel(e, fake.state.logs, spies);
+    });
+  }
+
+  const ALLOWED_VALUES: Array<[string, () => unknown]> = [
+    ["nested objects and arrays", () => ({ b: 2, a: [1, { c: null }], s: "\u00e9", t: false, n: 1.5 })],
+    ["a null-prototype object", () => Object.assign(Object.create(null), { a: 1 })],
+    ["an own __proto__ key", () => JSON.parse('{"__proto__":{"x":1},"y":2}')],
+    ["a shared (acyclic) reference", () => {
+      const shared = { s: 1 };
+      return { a: shared, b: shared };
+    }],
+    ["an object property that is undefined (dropped, as JSON drops it)", () => ({ a: 1, gone: undefined })],
+    ["a plain object with a non-function then", () => ({ then: "later" })],
+  ];
+  for (const [label, make] of ALLOWED_VALUES) {
+    it(`(C1) an allowed value (${label}) is stored byte-equal to its JSON text`, () => {
+      const fake = makeFakeHostConfig();
+      fake.setRaw(ID, JSON.stringify(ROW));
+      fake.update(ID, make);
+      expect(fake.rawOf(ID)).toBe(JSON.stringify(make()));
+      expect(fake.state.portCalls.compareAndSwap).toBe(1);
+    });
+  }
 });
 
 describe("fake host connector-config read and write: the host's read model", () => {

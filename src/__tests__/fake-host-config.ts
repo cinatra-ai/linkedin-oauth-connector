@@ -15,8 +15,12 @@
 // - update(id, updater): the host rules U0-U11: the raw text is read on every
 //   attempt (never the cache), the bytes are compared, the insert reports its
 //   result, at most 5 attempts, fixed value-free errors with no cause, one log
-//   line per thrown error. `beforePersist(++persists)` runs right before each
-//   swap or insert, `afterInsert` right after an insert that landed.
+//   line per thrown error. The updater's result is stored only when it is made
+//   of the JSON kinds alone (the host's allow-list, jsonCopy below); anything
+//   else is UPDATE_INVALID. A landed swap or insert EVICTS this process's cache
+//   entry (it never caches the stored text), so the next read reads the row.
+//   `beforePersist(++persists)` runs right before each swap or insert,
+//   `afterInsert` right after an insert that landed.
 // - Interleavings are forced by the synchronous hooks; the clock is manual.
 import { expect, vi } from "vitest";
 
@@ -57,9 +61,74 @@ export const sentinelStoreError = (): Error => Object.assign(new Error(SENTINEL)
 
 const clone = <T,>(v: T): T => (v === undefined ? v : structuredClone(v));
 
-function isThenable(v: unknown): boolean {
-  if ((typeof v !== "object" || v === null) && typeof v !== "function") return false;
-  return typeof (v as { then?: unknown }).then === "function";
+const REFUSED = Symbol("refused");
+const noop = () => {};
+
+/** The host's thenable check: a thenable is refused, and its rejection (and
+ *  that of a thenable its `then` returns) is marked handled first. */
+function isThenable(value: object): boolean {
+  let then: unknown;
+  try {
+    then = (value as { then?: unknown }).then;
+  } catch {
+    return true;
+  }
+  if (typeof then !== "function") return false;
+  try {
+    const result: unknown = Reflect.apply(then, value, [undefined, noop]);
+    const next: unknown =
+      result !== null && (typeof result === "object" || typeof result === "function") ? (result as { then?: unknown }).then : undefined;
+    if (typeof next === "function") Reflect.apply(next, result, [undefined, noop]);
+  } catch {
+    /* refused anyway */
+  }
+  return true;
+}
+
+/** The host's allow-list of JSON kinds: null, booleans, strings, finite
+ *  numbers, arrays without holes or extra keys, and plain objects (prototype
+ *  Object.prototype or null) of own enumerable data properties with string
+ *  keys; `undefined` only as an object property value, dropped. Anything else
+ *  (NaN, Infinity, bigint, symbol, function, thenable, Map, Set, Date, boxed
+ *  primitive, class instance, accessor, symbol key, hole, cycle) is REFUSED. */
+function jsonCopy(value: unknown, ancestors: Set<object>): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : REFUSED;
+  if (typeof value === "function") {
+    isThenable(value);
+    return REFUSED;
+  }
+  if (typeof value !== "object" || ancestors.has(value) || isThenable(value)) return REFUSED;
+  const isArray = Array.isArray(value);
+  const proto: unknown = Object.getPrototypeOf(value);
+  if (isArray ? proto !== Array.prototype : proto !== Object.prototype && proto !== null) return REFUSED;
+  const ownKeys = Reflect.ownKeys(value);
+  if (isArray && ownKeys.length !== (value as unknown[]).length + 1) return REFUSED;
+  const keys = isArray ? ownKeys.filter((name) => name !== "length") : ownKeys;
+  if (isArray && !keys.every((name, i) => name === String(i))) return REFUSED;
+  const out = (isArray ? [] : Object.create(null)) as Record<string, unknown>;
+  ancestors.add(value);
+  for (const name of keys) {
+    if (typeof name !== "string") return REFUSED;
+    const d = Object.getOwnPropertyDescriptor(value, name);
+    if (!d || !d.enumerable || !("value" in d)) return REFUSED;
+    if (d.value === undefined && !isArray) continue;
+    const copy = jsonCopy(d.value, ancestors);
+    if (copy === REFUSED) return REFUSED;
+    out[name] = copy;
+  }
+  ancestors.delete(value);
+  return out;
+}
+
+/** The JSON text to store, or undefined when `next` is not made of JSON kinds only. */
+function storableRaw(next: unknown): string | undefined {
+  try {
+    const copy = jsonCopy(next, new Set());
+    return copy === REFUSED ? undefined : JSON.stringify(copy);
+  } catch {
+    return undefined; // a proxy trap or a too-deep value
+  }
 }
 
 function sqlstateOf(e: unknown): string | undefined {
@@ -185,16 +254,9 @@ export function makeFakeHostConfig(opts: { cacheTtlMs?: number } = {}) {
       } catch {
         refuse("CONNECTOR_CONFIG_UPDATER_FAILED");
       }
-      let invalid = next === undefined || typeof next === "function";
-      let nextRaw: unknown;
-      try {
-        invalid = invalid || isThenable(next);
-        if (!invalid) nextRaw = JSON.stringify(next);
-      } catch {
-        invalid = true;
-      }
-      if (invalid || typeof nextRaw !== "string") refuse("CONNECTOR_CONFIG_UPDATE_INVALID");
-      const text = nextRaw as string;
+      const nextRaw = storableRaw(next);
+      if (typeof nextRaw !== "string") refuse("CONNECTOR_CONFIG_UPDATE_INVALID");
+      const text = nextRaw;
       state.persists += 1;
       beforePersistHook?.(state.persists);
       let done = false;
@@ -212,8 +274,9 @@ export function makeFakeHostConfig(opts: { cacheTtlMs?: number } = {}) {
       if (done) {
         landedOn(id, text);
         if (raw === null) afterInsertHook?.(id);
-        // U8: the value as stored, with a fresh TTL (this fake caches only with cacheTtlMs).
-        cacheSet(id, JSON.parse(text));
+        // U8: evict, never cache the stored text: another writer may change the
+        // row after it landed, so the next read reads the row.
+        state.cache.delete(id);
         return;
       }
     }
