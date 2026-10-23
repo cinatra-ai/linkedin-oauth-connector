@@ -35,6 +35,11 @@
 // - Host identity: every host service comes from the provider registered under
 //   the host's own identity (hostProvider), never from the first one listed.
 //
+// Complete credentials (pinned by src/__tests__/save-connection-guards.test.ts):
+// a save whose merged row would lack the Client ID or the Client secret refuses
+// with LINKEDIN_CONFIG_INCOMPLETE, a fixed text, and writes nothing. A blank
+// field still keeps the stored value.
+//
 // SDK imports are TYPE-ONLY (the serverEntry graph bans SDK value imports);
 // host services come through the capability registry.
 
@@ -50,6 +55,28 @@ type ConnectorConfigStore = HostConnectorConfigService & {
 const PACKAGE_NAME = "@cinatra-ai/linkedin-oauth-connector";
 // The shared connector-config key the LinkedIn connector reads and writes.
 const LINKEDIN_CONFIG_KEY = "linkedin";
+
+// Hydration proof (pinned by src/__tests__/save-connection-guards.test.ts). The
+// host draws the setup form from currentConfig's values, and on any hydration
+// failure (the read throws, times out or is not found) it draws a blank form,
+// whose Switch shows its default and posts "false". The Client ID text field is
+// the proof: the host fills it from currentConfig, so a posted Client ID that is
+// non-empty and equals the stored one comes from a hydrated form. A save changes
+// organizationPosting only with that proof, or when the stored row has no Client
+// ID and its organizationPosting is not true: that row has nothing a blank form
+// can lose. A stored true without a stored Client ID (an older version of this
+// connector saved such rows) gets no proof, because no Client ID can prove it.
+// Without the proof a save whose posted flag differs from the stored flag
+// refuses with LINKEDIN_CONFIG_NOT_READ and writes nothing, and a save whose
+// posted flag equals it proceeds with the flag unchanged, so nothing is dropped
+// silently. Cost: a save that changes the Client ID and the setting together
+// refuses; save the Client ID first. A retyped stored Client ID counts as the
+// proof.
+function hydrationProof(postedId: string, current: LinkedInConnectorConfig): boolean {
+  const storedId = str(current.clientId).trim();
+  if (storedId === "") return current.organizationPosting !== true;
+  return postedId !== "" && postedId === storedId;
+}
 
 /** The host-published action-guard service. `require(packageId, mode)`
  *  resolves the actor from the request session and enforces the per-install
@@ -112,6 +139,29 @@ export class LinkedInConfigRowError extends Error {
       "The stored LinkedIn settings are not a plain object, so they cannot be read or changed. Nothing was changed.",
     );
     this.name = "LinkedInConfigRowError";
+  }
+}
+
+/** A save whose merged row would lack the Client ID or the Client secret. The
+ *  text is fixed and carries no stored or typed value. */
+export class LinkedInConfigIncompleteError extends Error {
+  readonly code = "LINKEDIN_CONFIG_INCOMPLETE";
+  constructor() {
+    super("Save both the Client ID and the Client secret. Nothing was changed.");
+    this.name = "LinkedInConfigIncompleteError";
+  }
+}
+
+/** A save that changes the Switch without the hydration proof: the form was
+ *  drawn without the stored settings, or the save changes the Client ID. The
+ *  text is fixed. */
+export class LinkedInConfigNotReadError extends Error {
+  readonly code = "LINKEDIN_CONFIG_NOT_READ";
+  constructor() {
+    super(
+      "This page could not confirm the stored Client ID, so it cannot change the Community Management setting. Nothing was changed. Reload the page; to change the Client ID, save it first, then change the setting.",
+    );
+    this.name = "LinkedInConfigNotReadError";
   }
 }
 
@@ -188,9 +238,10 @@ export function register(ctx: ExtensionHostContext): void {
   const writeRow = (change: (current: LinkedInConnectorConfig) => LinkedInConnectorConfig): void => {
     const s = store();
     if (typeof s.update !== "function") throw new LinkedInConfigCasUnavailableError();
-    // The host ends the call at the updater's first throw, so this flag, not
-    // the host's error code, tells this connector's own refusal apart.
+    // The host ends the call at the updater's first throw, so these flags, not
+    // the host's error code, tell this connector's own refusals apart.
     let rowRefused = false;
+    let refusal: LinkedInConfigIncompleteError | LinkedInConfigNotReadError | undefined;
     try {
       s.update(LINKEDIN_CONFIG_KEY, (raw) => {
         let current: LinkedInConnectorConfig;
@@ -200,12 +251,18 @@ export function register(ctx: ExtensionHostContext): void {
           rowRefused = true;
           throw new LinkedInConfigRowError();
         }
-        return change(current);
+        try {
+          return change(current);
+        } catch (e) {
+          if (e instanceof LinkedInConfigIncompleteError || e instanceof LinkedInConfigNotReadError) refusal = e;
+          throw e;
+        }
       });
     } catch (e) {
       const code = errorCode(e);
       if (code === "CONNECTOR_CONFIG_CONFLICT") throw new LinkedInConfigConflictError();
       if (code === "CONNECTOR_CONFIG_ROW_UNPARSEABLE" || rowRefused) throw new LinkedInConfigRowError();
+      if (refusal) throw refusal;
       throw new LinkedInConfigSaveError();
     }
   };
@@ -260,9 +317,11 @@ export function register(ctx: ExtensionHostContext): void {
   });
 
   // WRITE (manage-gated): merge the form's fields into the stored row. A blank
-  // Client ID or secret keeps the stored value; the flag changes only when the
-  // form sends "true" or "false". The write goes through the host's atomic
-  // update (see the header).
+  // Client ID or secret keeps the stored value; a merged row without both
+  // refuses (complete credentials, see the header). The flag changes only when
+  // the form sends "true" or "false" AND the save carries the hydration proof
+  // (see hydrationProof), read on the row the atomic update runs on; without
+  // the proof a posted flag that differs from the stored one refuses.
   ctx.ui.registerAction({
     id: "saveConnection",
     handler: async (input: unknown): Promise<{ banner: string }> => {
@@ -271,15 +330,24 @@ export function register(ctx: ExtensionHostContext): void {
         input && typeof input === "object" ? (input as Record<string, unknown>) : {};
       const id = str(fields.clientId).trim();
       const secret = str(fields.clientSecret).trim();
-      const flag = fields.organizationPosting;
-      writeRow((current) => ({
-        ...current,
-        clientId: id || current.clientId,
-        clientSecret: secret || current.clientSecret,
-        ...(flag === "true" || flag === "false"
-          ? { organizationPosting: flag === "true" }
-          : {}),
-      }));
+      writeRow((current) => {
+        const proof = hydrationProof(id, current);
+        const posted = fields.organizationPosting;
+        const flag = posted === "true" || posted === "false" ? posted === "true" : undefined;
+        if (!proof && flag !== undefined && flag !== (current.organizationPosting === true)) {
+          throw new LinkedInConfigNotReadError();
+        }
+        const next: LinkedInConnectorConfig = {
+          ...current,
+          clientId: id || current.clientId,
+          clientSecret: secret || current.clientSecret,
+          ...(proof && flag !== undefined ? { organizationPosting: flag } : {}),
+        };
+        if (!nonEmpty(next.clientId) || !nonEmpty(next.clientSecret)) {
+          throw new LinkedInConfigIncompleteError();
+        }
+        return next;
+      });
       return { banner: "saved" };
     },
   });

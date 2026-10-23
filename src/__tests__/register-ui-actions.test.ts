@@ -58,13 +58,12 @@ describe("linkedin-oauth-connector register(ctx) ui actions", () => {
   it("(b) a save merges into the stored row through one host update and keeps every key the form does not own", async () => {
     const { call, store, guardRequire } = makeCtx({ row: STORED });
     await expect(
-      call("saveConnection", { clientId: "b", clientSecret: "", organizationPosting: "true" }),
+      call("saveConnection", { clientId: "b", clientSecret: "" }),
     ).resolves.toEqual({ banner: "saved" });
     expect(guardRequire).toHaveBeenCalledWith("@cinatra-ai/linkedin-oauth-connector", "manage");
     expect(store.row).toEqual({
       clientId: "b",
       clientSecret: "s",
-      organizationPosting: true,
       accounts: [{ id: "x" }],
       loggingEnabled: true,
       redirectUri: "https://r",
@@ -74,9 +73,9 @@ describe("linkedin-oauth-connector register(ctx) ui actions", () => {
     expect(store.write).not.toHaveBeenCalled();
   });
 
-  it("(c) organizationPosting: \"false\" turns it off, an omitted key or other text leaves it", async () => {
+  it("(c) organizationPosting: \"false\" with the stored Client ID turns it off, an omitted key or other text leaves it", async () => {
     const off = makeCtx({ row: { ...STORED, organizationPosting: true } });
-    await off.call("saveConnection", { organizationPosting: "false" });
+    await off.call("saveConnection", { clientId: "a", organizationPosting: "false" });
     expect(off.store.row?.organizationPosting).toBe(false);
 
     const omitted = makeCtx({ row: { ...STORED, organizationPosting: true } });

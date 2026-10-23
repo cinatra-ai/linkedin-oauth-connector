@@ -209,10 +209,9 @@ describe("rule 1: writes go only through the host's atomic update", () => {
     fake.beforePersist((n) => {
       if (n === 1) fake.otherProcessWrites(KEY, { ...STORED, accounts: TWO_ACCOUNTS });
     });
-    const out = await outcomeOf(call("saveConnection", { clientId: "b", organizationPosting: "false" }));
+    const out = await outcomeOf(call("saveConnection", { clientId: "a", organizationPosting: "false" }));
     expect(fake.rowOf(KEY), "RACE: row content").toEqual({
       ...STORED,
-      clientId: "b",
       organizationPosting: false,
       accounts: TWO_ACCOUNTS,
     });
