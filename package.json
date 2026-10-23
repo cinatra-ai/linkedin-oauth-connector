@@ -5,36 +5,20 @@
   "type": "module",
   "files": [
     "src",
-    "!src/__tests__"
-  ,
-    "cinatra"],
+    "!src/__tests__",
+    "cinatra"
+  ],
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./setup-page": "./src/setup-page.tsx",
-    "./actions": "./src/actions.ts"
-  },
-  "dependencies": {
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "lucide-react": "^1.7.0",
-    "radix-ui": "^1.4.3",
-    "tailwind-merge": "^3.5.0",
-    "zod": "^4.4.3"
+    "./register": "./src/register.ts"
   },
   "peerDependencies": {
-    "next": "^16.2.9",
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3",
-    "@cinatra-ai/sdk-extensions": "*",
-    "@cinatra-ai/sdk-ui": "*"
+    "@cinatra-ai/sdk-extensions": "*"
   },
   "peerDependenciesMeta": {
     "@cinatra-ai/sdk-extensions": {
-      "optional": true
-    },
-    "@cinatra-ai/sdk-ui": {
       "optional": true
     }
   },
@@ -54,8 +38,125 @@
     "displayName": "LinkedIn OAuth",
     "logo": "./cinatra/logo.svg",
     "sdkAbiRange": "^2",
-    "requestedHostPorts": ["nango"],
-    "dependencies": []
+    "requestedHostPorts": [
+      "nango",
+      "capabilities",
+      "ui"
+    ],
+    "dependencies": [],
+    "uiSurface": "schema-config",
+    "serverEntry": "./register",
+    "configSchema": {
+      "title": "LinkedIn OAuth",
+      "description": "Configure the LinkedIn app the workspace uses to connect member and organization accounts. Save its Client ID and Client secret here; users then connect their own LinkedIn account from the LinkedIn connector.",
+      "hydrateAction": "currentConfig",
+      "fields": [
+        {
+          "kind": "banner",
+          "label": "Result",
+          "variants": [
+            {
+              "name": "saved",
+              "tone": "success",
+              "message": "LinkedIn OAuth settings saved."
+            },
+            {
+              "name": "cleared",
+              "tone": "warning",
+              "message": "LinkedIn OAuth credentials cleared."
+            },
+            {
+              "name": "error",
+              "tone": "destructive",
+              "message": "Something went wrong."
+            }
+          ]
+        },
+        {
+          "kind": "text",
+          "key": "clientId",
+          "label": "Client ID",
+          "description": "The Client ID of your LinkedIn developer app."
+        },
+        {
+          "kind": "secret",
+          "key": "clientSecret",
+          "label": "Client secret",
+          "description": "Write-only — leave blank to keep the saved secret."
+        },
+        {
+          "kind": "boolean",
+          "key": "organizationPosting",
+          "label": "This app has the Community Management API (post to company pages)",
+          "defaultValue": false,
+          "description": "Turn this on only for an app whose one product is the Community Management API. Connecting then asks LinkedIn for company page permissions instead of sign-in permissions. After changing it, reconnect each LinkedIn account."
+        },
+        {
+          "kind": "copyable-credential",
+          "key": "redirectUri",
+          "label": "Authorized redirect URI",
+          "description": "Register this exact URI in the LinkedIn developer app. It is derived automatically from the configured Nango server."
+        },
+        {
+          "kind": "status-probe",
+          "label": "Connection",
+          "actionId": "connectionStatus",
+          "description": "Checks whether both the Client ID and the Client secret are saved."
+        },
+        {
+          "kind": "named-action",
+          "label": "Connect",
+          "actionId": "saveConnection",
+          "role": "connect"
+        },
+        {
+          "kind": "named-action",
+          "label": "Disconnect",
+          "actionId": "clearConnection",
+          "role": "disconnect"
+        }
+      ],
+      "tabs": [
+        {
+          "id": "help",
+          "label": "Help",
+          "fields": [
+            {
+              "kind": "advisory",
+              "label": "About this connector",
+              "tone": "info",
+              "probeActionId": "helpContentReady",
+              "whenReady": "This page configures the shared LinkedIn app credentials the workspace uses to connect member and organization accounts. It is admin-level setup, not a personal connection. Once the credentials on the Setup tab are saved, users connect their own LinkedIn account from the LinkedIn connector.",
+              "whenNotReady": "This page configures the shared LinkedIn app credentials the workspace uses to connect member and organization accounts. It is admin-level setup, not a personal connection. Once the credentials on the Setup tab are saved, users connect their own LinkedIn account from the LinkedIn connector."
+            },
+            {
+              "kind": "advisory",
+              "label": "Create a LinkedIn developer app",
+              "tone": "info",
+              "probeActionId": "helpContentReady",
+              "whenReady": "Create a LinkedIn developer app at linkedin.com/developers/apps (LinkedIn Developer Portal → Create app).",
+              "whenNotReady": "Create a LinkedIn developer app at linkedin.com/developers/apps (LinkedIn Developer Portal → Create app)."
+            },
+            {
+              "kind": "advisory",
+              "label": "Save the Client ID and secret",
+              "tone": "info",
+              "probeActionId": "helpContentReady",
+              "whenReady": "Copy the app's Client ID and Client secret onto the Setup tab and save. The secret is write-only — once saved it never round-trips back to the browser, so leave it blank on a later save to keep the stored value.",
+              "whenNotReady": "Copy the app's Client ID and Client secret onto the Setup tab and save. The secret is write-only — once saved it never round-trips back to the browser, so leave it blank on a later save to keep the stored value."
+            },
+            {
+              "kind": "advisory",
+              "label": "Register the redirect URI",
+              "tone": "info",
+              "probeActionId": "helpContentReady",
+              "whenReady": "Register the exact Authorized redirect URI shown on the Setup tab in the LinkedIn app's OAuth settings. It must match exactly, or LinkedIn rejects the connection with a redirect_uri mismatch.",
+              "whenNotReady": "Register the exact Authorized redirect URI shown on the Setup tab in the LinkedIn app's OAuth settings. It must match exactly, or LinkedIn rejects the connection with a redirect_uri mismatch."
+            }
+          ]
+        }
+      ]
+    }
   },
   "scripts": {
     "test": "vitest",
